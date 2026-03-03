@@ -1,4 +1,8 @@
-import mysql, { type OkPacket, type RowDataPacket, type ResultSetHeader, type FieldPacket } from 'mysql2/promise';
+import mysql, {
+  type RowDataPacket,
+  type ResultSetHeader,
+  type PoolConnection,
+} from 'mysql2/promise';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 
@@ -22,6 +26,8 @@ export function getPool(): mysql.Pool {
       timezone: '+00:00',
       dateStrings: false,
       decimalNumbers: true,
+      // Permite múltiplos statements por conexão (necessário para procedures)
+      multipleStatements: false,
     });
 
     logger.info('MySQL connection pool created', {
@@ -35,8 +41,8 @@ export function getPool(): mysql.Pool {
 }
 
 /**
- * Executa uma query SELECT com parâmetros posicionais (?).
- * Retorna um array tipado de resultados.
+ * Executa uma query SELECT com parâmetros usando prepared statements.
+ * Use para SELECT com parâmetros dinâmicos (mais seguro contra SQL injection).
  */
 export async function query<T = Record<string, unknown>>(
   sql: string,
@@ -44,7 +50,8 @@ export async function query<T = Record<string, unknown>>(
 ): Promise<T[]> {
   const start = Date.now();
   try {
-    const [rows] = await getPool().execute<RowDataPacket[]>(sql, params as unknown as RowDataPacket[]);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const [rows] = await getPool().execute<RowDataPacket[]>(sql, params as any);
     const duration = Date.now() - start;
     logger.debug('Database query executed', {
       query: sql.substring(0, 100),
@@ -62,7 +69,21 @@ export async function query<T = Record<string, unknown>>(
 }
 
 /**
- * Executa uma query de escrita (INSERT/UPDATE/DELETE).
+ * Executa um statement DDL ou comando que não suporta prepared statements
+ * (CREATE TABLE, CREATE INDEX, DROP, ALTER, CALL, etc.).
+ * NÃO use para queries com dados de usuário — sem proteção contra SQL injection.
+ */
+export async function ddl(sql: string): Promise<void> {
+  const conn = await getPool().getConnection();
+  try {
+    await conn.query(sql);
+  } finally {
+    conn.release();
+  }
+}
+
+/**
+ * Executa uma query de escrita (INSERT/UPDATE/DELETE) com prepared statements.
  * Retorna o ResultSetHeader com insertId e affectedRows.
  */
 export async function execute(
@@ -78,7 +99,7 @@ export async function execute(
  * Executa múltiplas queries dentro de uma transação.
  */
 export async function transaction<T>(
-  fn: (conn: mysql.PoolConnection) => Promise<T>
+  fn: (conn: PoolConnection) => Promise<T>
 ): Promise<T> {
   const conn = await getPool().getConnection();
   await conn.beginTransaction();
