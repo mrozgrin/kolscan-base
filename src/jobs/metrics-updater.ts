@@ -7,15 +7,29 @@ let metricsInterval: NodeJS.Timeout | null = null;
 let pricesInterval: NodeJS.Timeout | null = null;
 
 /**
- * Inicia o job de atualização de métricas dos KOLs
+ * Inicia o job de atualização de métricas dos KOLs.
+ *
+ * Ao reiniciar o programa, o recálculo é executado IMEDIATAMENTE e de forma
+ * síncrona (await) antes de retornar, garantindo que o leaderboard e o
+ * follow_score já estejam atualizados com os dados do MySQL quando a API
+ * começar a receber requisições.
+ *
+ * Após o recálculo inicial, o job continua rodando periodicamente conforme
+ * METRICS_UPDATE_INTERVAL (padrão: 5 minutos).
  */
-export function startMetricsUpdater(): void {
+export async function startMetricsUpdater(): Promise<void> {
   logger.info('Starting metrics updater job...');
 
-  // Executar imediatamente na inicialização
-  updateAllKolMetrics().catch((err) => {
-    logger.error('Initial metrics update failed', { error: err.message });
-  });
+  // Recalcular AGORA com os dados já gravados no MySQL.
+  // Isso garante que follow_score, profit_pct e holding_time estejam
+  // corretos mesmo após um restart sem reindexar a blockchain.
+  logger.info('Running initial metrics recalculation from existing MySQL data...');
+  try {
+    await updateAllKolMetrics();
+    logger.info('Initial metrics recalculation completed — leaderboard is ready');
+  } catch (err) {
+    logger.error('Initial metrics recalculation failed', { error: (err as Error).message });
+  }
 
   // Agendar atualizações periódicas
   metricsInterval = setInterval(async () => {
@@ -35,7 +49,6 @@ export function startMetricsUpdater(): void {
 export function startPricesUpdater(): void {
   logger.info('Starting prices updater job...');
 
-  // Atualizar preços a cada 2 minutos
   pricesInterval = setInterval(async () => {
     try {
       await updateAllTokenPrices();
@@ -48,7 +61,7 @@ export function startPricesUpdater(): void {
 }
 
 /**
- * Para todos os jobs
+ * Para todos os jobs em background
  */
 export function stopAllJobs(): void {
   if (metricsInterval) {

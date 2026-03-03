@@ -38,7 +38,8 @@ async function main(): Promise<void> {
   await startServer();
 
   // 5. Iniciar jobs em background
-  startMetricsUpdater();
+  // startMetricsUpdater é async: aguarda o recálculo inicial antes de continuar
+  await startMetricsUpdater();
   startPricesUpdater();
 
   // 6. Iniciar indexador (se habilitado e provider disponível)
