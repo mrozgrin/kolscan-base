@@ -53,6 +53,10 @@ export interface LeaderboardEntry {
   profit_usd: number;
   win_rate: number;
   period: 'daily' | 'weekly' | 'monthly' | 'all_time';
+  // Métricas de holding time e follow score
+  holding_time_avg_s?: number;    // Média de segundos nas posições
+  scalping_rate: number;          // % de trades considerados scalping
+  follow_score: number;           // Nota 0-100 para seguir o trader
 }
 
 export interface TokenInfo {

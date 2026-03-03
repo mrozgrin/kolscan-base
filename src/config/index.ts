@@ -67,6 +67,16 @@ export const config = {
     minTradesForKol: parseInt(process.env.MIN_TRADES_FOR_KOL || '5', 10),
     // Número de KOLs no leaderboard
     leaderboardSize: parseInt(process.env.LEADERBOARD_SIZE || '100', 10),
+    // Limiar de scalping em segundos: trades abaixo desse tempo são considerados scalping
+    // Padrão: 120 segundos (2 minutos)
+    scalpingThresholdSeconds: parseInt(process.env.SCALPING_THRESHOLD_SECONDS || '120', 10),
+    // Peso do win rate no cálculo do follow score (0-100)
+    followScoreWinRateWeight: parseFloat(process.env.FOLLOW_SCORE_WINRATE_WEIGHT || '0.5'),
+    // Peso do holding time no cálculo do follow score (0-100)
+    followScoreHoldingWeight: parseFloat(process.env.FOLLOW_SCORE_HOLDING_WEIGHT || '0.5'),
+    // Tempo de holding considerado excelente (em segundos) para pontuação máxima
+    // Padrão: 3600 segundos (1 hora)
+    followScoreMaxHoldingSeconds: parseInt(process.env.FOLLOW_SCORE_MAX_HOLDING_SECONDS || '3600', 10),
   },
 
   // Cache

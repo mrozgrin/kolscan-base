@@ -127,7 +127,46 @@ async function processTransaction(
 }
 
 /**
- * Processa um evento de swap e calcula PnL
+ * Calcula o tempo de holding em segundos para um token.
+ * Busca o swap de compra mais recente do mesmo token pela mesma carteira
+ * e retorna a diferença de tempo em segundos.
+ * Retorna null se não houver compra anterior registrada.
+ */
+async function calculateHoldingTime(
+  walletAddress: string,
+  tokenOutAddress: string, // token que está sendo vendido agora (era token_out na compra)
+  currentTimestamp: Date
+): Promise<number | null> {
+  try {
+    // Buscar o swap mais recente onde este token foi comprado (token_out) pela mesma carteira
+    const result = await query<{ timestamp: Date }>(
+      `SELECT timestamp
+       FROM swap_events
+       WHERE wallet_address    = ?
+         AND token_out_address = ?
+         AND timestamp        < ?
+       ORDER BY timestamp DESC
+       LIMIT 1`,
+      [walletAddress, tokenOutAddress, currentTimestamp]
+    );
+
+    if (!result.length) return null;
+
+    const buyTime = new Date(result[0].timestamp).getTime();
+    const sellTime = currentTimestamp.getTime();
+    const holdingSeconds = Math.round((sellTime - buyTime) / 1000);
+
+    // Sanidade: ignorar valores negativos ou absurdamente grandes (> 1 ano)
+    if (holdingSeconds <= 0 || holdingSeconds > 365 * 24 * 3600) return null;
+
+    return holdingSeconds;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Processa um evento de swap e calcula PnL e holding time
  */
 async function processSwapEvent(
   swapEvent: SwapEvent,
@@ -139,9 +178,9 @@ async function processSwapEvent(
     getTokenInfo(swapEvent.token_out_address),
   ]);
 
-  const tokenInSymbol = tokenInInfo?.symbol || 'UNKNOWN';
-  const tokenOutSymbol = tokenOutInfo?.symbol || 'UNKNOWN';
-  const tokenInDecimals = tokenInInfo?.decimals || 18;
+  const tokenInSymbol  = tokenInInfo?.symbol   || 'UNKNOWN';
+  const tokenOutSymbol = tokenOutInfo?.symbol  || 'UNKNOWN';
+  const tokenInDecimals  = tokenInInfo?.decimals  || 18;
   const tokenOutDecimals = tokenOutInfo?.decimals || 18;
 
   // Calcular valor em USD
@@ -150,15 +189,13 @@ async function processSwapEvent(
     getTokenPrice(swapEvent.token_out_address),
   ]);
 
-  const tokenInAmount =
-    parseFloat(swapEvent.token_in_amount) / Math.pow(10, tokenInDecimals);
-  const tokenOutAmount =
-    parseFloat(swapEvent.token_out_amount) / Math.pow(10, tokenOutDecimals);
+  const tokenInAmount  = parseFloat(swapEvent.token_in_amount)  / Math.pow(10, tokenInDecimals);
+  const tokenOutAmount = parseFloat(swapEvent.token_out_amount) / Math.pow(10, tokenOutDecimals);
 
-  const valueInUsd = tokenInPrice ? tokenInAmount * tokenInPrice : null;
+  const valueInUsd  = tokenInPrice  ? tokenInAmount  * tokenInPrice  : null;
   const valueOutUsd = tokenOutPrice ? tokenOutAmount * tokenOutPrice : null;
 
-  // Calcular PnL (simplificado: valor saída - valor entrada)
+  // Calcular PnL (valor saída - valor entrada)
   let pnl: number | null = null;
   let isWin: boolean | null = null;
 
@@ -167,15 +204,23 @@ async function processSwapEvent(
     isWin = pnl > 0;
   }
 
+  // Calcular holding time: quanto tempo o trader ficou com o token_in antes de vender
+  // (token_in neste swap = token que foi comprado em swap anterior)
+  const holdingTimeS = await calculateHoldingTime(
+    walletAddress,
+    swapEvent.token_in_address,
+    swapEvent.timestamp
+  );
+
   // Salvar evento de swap
   await execute(
     `INSERT IGNORE INTO swap_events (
        tx_hash, block_number, timestamp, wallet_address, dex_address, dex_name,
        token_in_address, token_in_symbol, token_in_amount,
        token_out_address, token_out_symbol, token_out_amount,
-       value_usd, pnl, is_win
+       value_usd, pnl, is_win, holding_time_s
      )
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       swapEvent.tx_hash,
       swapEvent.block_number,
@@ -192,6 +237,7 @@ async function processSwapEvent(
       valueInUsd,
       pnl,
       isWin === null ? null : (isWin ? 1 : 0),
+      holdingTimeS,
     ]
   );
 }
