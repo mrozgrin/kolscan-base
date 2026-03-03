@@ -136,19 +136,57 @@ const migrations: Array<{
   {
     version: 2,
     name: 'create_indexes',
+    // MySQL não suporta CREATE INDEX IF NOT EXISTS.
+    // Usamos uma stored procedure temporária que verifica information_schema
+    // antes de criar cada índice, evitando erro se já existir.
     statements: [
-      `CREATE INDEX IF NOT EXISTS idx_transactions_wallet    ON transactions(wallet_address)`,
-      `CREATE INDEX IF NOT EXISTS idx_transactions_timestamp ON transactions(timestamp DESC)`,
-      `CREATE INDEX IF NOT EXISTS idx_transactions_block     ON transactions(block_number DESC)`,
-      `CREATE INDEX IF NOT EXISTS idx_transactions_type      ON transactions(tx_type)`,
-      `CREATE INDEX IF NOT EXISTS idx_swap_events_wallet     ON swap_events(wallet_address)`,
-      `CREATE INDEX IF NOT EXISTS idx_swap_events_timestamp  ON swap_events(timestamp DESC)`,
-      `CREATE INDEX IF NOT EXISTS idx_swap_events_token_in   ON swap_events(token_in_address)`,
-      `CREATE INDEX IF NOT EXISTS idx_swap_events_token_out  ON swap_events(token_out_address)`,
-      `CREATE INDEX IF NOT EXISTS idx_kol_metrics_wallet     ON kol_metrics(wallet_address)`,
-      `CREATE INDEX IF NOT EXISTS idx_kol_metrics_period     ON kol_metrics(period, period_start)`,
-      `CREATE INDEX IF NOT EXISTS idx_kol_metrics_profit     ON kol_metrics(profit_usd DESC)`,
-      `CREATE INDEX IF NOT EXISTS idx_wallets_last_seen      ON wallets(last_seen DESC)`,
+      `DROP PROCEDURE IF EXISTS create_index_if_not_exists`,
+
+      `CREATE PROCEDURE create_index_if_not_exists(
+         IN p_table VARCHAR(64),
+         IN p_index VARCHAR(64),
+         IN p_ddl   TEXT
+       )
+       BEGIN
+         IF NOT EXISTS (
+           SELECT 1 FROM information_schema.STATISTICS
+           WHERE table_schema = DATABASE()
+             AND table_name   = p_table
+             AND index_name   = p_index
+         ) THEN
+           SET @sql = p_ddl;
+           PREPARE stmt FROM @sql;
+           EXECUTE stmt;
+           DEALLOCATE PREPARE stmt;
+         END IF;
+       END`,
+
+      `CALL create_index_if_not_exists('transactions', 'idx_transactions_wallet',
+         'CREATE INDEX idx_transactions_wallet ON transactions(wallet_address)')`,
+      `CALL create_index_if_not_exists('transactions', 'idx_transactions_timestamp',
+         'CREATE INDEX idx_transactions_timestamp ON transactions(timestamp)')`,
+      `CALL create_index_if_not_exists('transactions', 'idx_transactions_block',
+         'CREATE INDEX idx_transactions_block ON transactions(block_number)')`,
+      `CALL create_index_if_not_exists('transactions', 'idx_transactions_type',
+         'CREATE INDEX idx_transactions_type ON transactions(tx_type)')`,
+      `CALL create_index_if_not_exists('swap_events', 'idx_swap_events_wallet',
+         'CREATE INDEX idx_swap_events_wallet ON swap_events(wallet_address)')`,
+      `CALL create_index_if_not_exists('swap_events', 'idx_swap_events_timestamp',
+         'CREATE INDEX idx_swap_events_timestamp ON swap_events(timestamp)')`,
+      `CALL create_index_if_not_exists('swap_events', 'idx_swap_events_token_in',
+         'CREATE INDEX idx_swap_events_token_in ON swap_events(token_in_address)')`,
+      `CALL create_index_if_not_exists('swap_events', 'idx_swap_events_token_out',
+         'CREATE INDEX idx_swap_events_token_out ON swap_events(token_out_address)')`,
+      `CALL create_index_if_not_exists('kol_metrics', 'idx_kol_metrics_wallet',
+         'CREATE INDEX idx_kol_metrics_wallet ON kol_metrics(wallet_address)')`,
+      `CALL create_index_if_not_exists('kol_metrics', 'idx_kol_metrics_period',
+         'CREATE INDEX idx_kol_metrics_period ON kol_metrics(period, period_start)')`,
+      `CALL create_index_if_not_exists('kol_metrics', 'idx_kol_metrics_profit',
+         'CREATE INDEX idx_kol_metrics_profit ON kol_metrics(profit_usd)')`,
+      `CALL create_index_if_not_exists('wallets', 'idx_wallets_last_seen',
+         'CREATE INDEX idx_wallets_last_seen ON wallets(last_seen)')`,
+
+      `DROP PROCEDURE IF EXISTS create_index_if_not_exists`,
     ],
   },
 ];
