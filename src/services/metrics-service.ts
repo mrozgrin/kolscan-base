@@ -132,7 +132,9 @@ async function computeFollowScore(wallet: string, periodDays: number): Promise<S
     if (p90Pnl===0) p90Pnl=1;
   }
 
-  const profitFactor = grossLoss===0 ? (grossProfit>0 ? 100 : 0) : grossProfit/grossLoss;
+  // Cap em 9999 para evitar out-of-range na coluna DECIMAL(10,2)
+  const rawProfitFactor = grossLoss===0 ? (grossProfit>0 ? 9999 : 0) : grossProfit/grossLoss;
+  const profitFactor = Math.min(9999, Math.max(0, rawProfitFactor));
   const pnlRatio = totalPnl/Math.abs(p90Pnl);
   const pnlRelScore = pnlRatio>=1 ? 100 : pnlRatio>=0.5 ? 50+(pnlRatio-0.5)/0.5*50 : pnlRatio>=0.1 ? 10+(pnlRatio-0.1)/0.4*40 : pnlRatio>0 ? pnlRatio/0.1*10 : 0;
   const pfScore = profitFactor>=3 ? 100 : profitFactor>=2 ? 80+(profitFactor-2)*20 : profitFactor>=1.5 ? 60+(profitFactor-1.5)/0.5*20 : profitFactor>=1 ? 40+(profitFactor-1)/0.5*20 : 0;
@@ -197,7 +199,9 @@ export async function updateKolMetrics(wallet: string): Promise<void> {
       );
       const b = basicRows[0];
       if (!b) continue;
-      const profitPct = Number(b.total_invested_usd)>0 ? Math.round((Number(b.profit_usd)/Number(b.total_invested_usd))*10000)/100 : 0;
+      // Cap em 999999.9999 para evitar out-of-range na coluna DECIMAL(20,4)
+      const rawProfitPct = Number(b.total_invested_usd)>0 ? Math.round((Number(b.profit_usd)/Number(b.total_invested_usd))*10000)/100 : 0;
+      const profitPct = Math.min(999999.9999, Math.max(-999999.9999, rawProfitPct));
       const periodStart = new Date(Date.now()-period.days*86400*1000);
 
       await execute(

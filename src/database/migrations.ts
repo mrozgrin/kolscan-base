@@ -600,6 +600,24 @@ const migrations: Array<{
         await ddl(`CREATE INDEX idx_se_is_long_trade ON swap_events(is_long_trade)`);
     },
   },
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Migration 8: aumentar precisão de profit_pct e pnl_profit_factor
+  // profit_pct pode ultrapassar 999999% em memecoins (ex: +10.000.000%)
+  // pnl_profit_factor pode ultrapassar 99.999.999 quando gross_loss ≈ 0
+  // ───────────────────────────────────────────────────────────────────────────
+  {
+    version: 8,
+    name: 'fix_decimal_overflow_profit_pct_and_profit_factor',
+    async up() {
+      // profit_pct: DECIMAL(10,4) → DECIMAL(20,4)  (suporta até 9.999.999.999.999.999,9999)
+      await ddl(`ALTER TABLE kol_metrics MODIFY COLUMN profit_pct DECIMAL(20,4) DEFAULT NULL`);
+
+      // pnl_profit_factor: DECIMAL(10,2) → DECIMAL(12,2)  (suporta até 9.999.999.999,99)
+      // O código já faz cap em 9999, mas aumentamos a coluna por segurança
+      await ddl(`ALTER TABLE kol_metrics MODIFY COLUMN pnl_profit_factor DECIMAL(12,2) DEFAULT NULL`);
+    },
+  },
 ];
 
 export async function runMigrations(): Promise<void> {
