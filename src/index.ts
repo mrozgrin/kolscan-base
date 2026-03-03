@@ -1,6 +1,6 @@
 import { testConnection, closePool } from './database/connection';
 import { runMigrations } from './database/migrations';
-import { testProviderConnection } from './indexer/provider';
+import { testProviderConnection, destroyProviders } from './indexer/provider';
 import { startIndexer, stopIndexer } from './indexer/block-indexer';
 import { startServer } from './api/server';
 import { startMetricsUpdater, startPricesUpdater, stopAllJobs } from './jobs/metrics-updater';
@@ -56,6 +56,7 @@ async function main(): Promise<void> {
     logger.info(`Received ${signal}, shutting down...`);
     stopIndexer();
     stopAllJobs();
+    destroyProviders();
     await closePool();
     process.exit(0);
   };
