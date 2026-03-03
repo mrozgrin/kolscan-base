@@ -212,15 +212,24 @@ async function processSwapEvent(
     swapEvent.timestamp
   );
 
+  // is_long_trade: flag binária que indica se o trade durou mais que o limiar de scalping.
+  //   1   = trade longo (holding >= threshold) — bom para o follow score
+  //   0   = scalping   (holding <  threshold) — penaliza o follow score
+  //   null = sem compra anterior registrada — ignorado na média
+  const scalpingThreshold = config.indexer.scalpingThresholdSeconds;
+  const isLongTrade = holdingTimeS === null
+    ? null
+    : holdingTimeS >= scalpingThreshold ? 1 : 0;
+
   // Salvar evento de swap
   await execute(
     `INSERT IGNORE INTO swap_events (
        tx_hash, block_number, timestamp, wallet_address, dex_address, dex_name,
        token_in_address, token_in_symbol, token_in_amount,
        token_out_address, token_out_symbol, token_out_amount,
-       value_usd, pnl, is_win, holding_time_s
+       value_usd, pnl, is_win, holding_time_s, is_long_trade
      )
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       swapEvent.tx_hash,
       swapEvent.block_number,
@@ -238,6 +247,7 @@ async function processSwapEvent(
       pnl,
       isWin === null ? null : (isWin ? 1 : 0),
       holdingTimeS,
+      isLongTrade,
     ]
   );
 }
@@ -276,14 +286,25 @@ async function syncHistoricalBlocks(
   toBlock: number
 ): Promise<void> {
   logger.info(`Starting historical sync from block ${fromBlock} to ${toBlock}`);
-  const totalBlocks = toBlock - fromBlock;
+  const totalBlocks = Math.max(toBlock - fromBlock, 1);
   let processedBlocks = 0;
   const startTime = Date.now();
 
   for (let blockNum = fromBlock; blockNum <= toBlock; blockNum += config.blockchain.batchSize) {
+    if (!isRunning) break;
+
+    // Nunca ultrapassar o toBlock capturado no início da sincronização
     const endBlock = Math.min(blockNum + config.blockchain.batchSize - 1, toBlock);
 
-    // Processar blocos em paralelo (batch)
+    // Verificar o bloco mais recente da rede antes de cada batch:
+    // se o endBlock ainda não foi minerado, aguardar até ele existir
+    let networkHead = await getLatestBlockNumber();
+    while (networkHead < endBlock) {
+      logger.debug(`Waiting for block ${endBlock} to be mined (current head: ${networkHead})...`);
+      await sleep(config.blockchain.pollingInterval);
+      networkHead = await getLatestBlockNumber();
+    }
+
     const blockNumbers = Array.from(
       { length: endBlock - blockNum + 1 },
       (_, i) => blockNum + i
@@ -302,7 +323,6 @@ async function syncHistoricalBlocks(
 
     logger.info(`Sync progress: ${progress.toFixed(2)}% (${processedBlocks}/${totalBlocks} blocks, ${blocksPerSecond.toFixed(2)} blocks/s)`);
 
-    // Pequena pausa para não sobrecarregar o RPC
     await sleep(100);
   }
 }

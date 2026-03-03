@@ -9,6 +9,7 @@
     "dev:api-only": "INDEXER_ENABLED=false nodemon --exec ts-node src/index.ts",
     "typecheck": "tsc --noEmit",
     "db:migrate": "ts-node -e \"require('./src/database/migrations').runMigrations().then(() => process.exit(0)).catch((e: unknown) => { console.error(e); process.exit(1); })\"",
+    "recalculate-holding": "ts-node src/scripts/recalculate-holding.ts",
     "test": "echo \"No tests configured yet\" && exit 0"
   },
   "repository": {

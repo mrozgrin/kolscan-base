@@ -236,6 +236,53 @@ const migrations: Array<{
   },
 
   {
+    version: 5,
+    name: 'add_is_long_trade',
+    // Nova lógica de holding:
+    //   is_long_trade = 1 se holding_time_s >= SCALPING_THRESHOLD_SECONDS
+    //   is_long_trade = 0 se holding_time_s <  SCALPING_THRESHOLD_SECONDS
+    //   is_long_trade = NULL se holding_time_s é NULL (sem compra anterior registrada)
+    //
+    // A média de is_long_trade (AVG) resulta numa taxa 0.0-1.0 que representa
+    // o percentual de trades com duração adequada. Isso evita que outliers
+    // (ex: um trade de 30 dias) distorcem a média de holding time.
+    up: async () => {
+      async function addColumnIfMissing(
+        table: string,
+        column: string,
+        definition: string
+      ): Promise<void> {
+        const exists = await query<{ cnt: number }>(
+          `SELECT COUNT(*) AS cnt
+           FROM information_schema.COLUMNS
+           WHERE table_schema = DATABASE()
+             AND table_name   = ?
+             AND column_name  = ?`,
+          [table, column]
+        );
+        if (!exists[0] || exists[0].cnt === 0) {
+          await ddl(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+        }
+      }
+
+      await addColumnIfMissing('swap_events', 'is_long_trade',
+        "TINYINT(1) DEFAULT NULL COMMENT '1 se holding >= threshold, 0 se < threshold, NULL se sem compra anterior'");
+
+      // Índice para acelerar AVG(is_long_trade) nas queries de leaderboard
+      const idxExists = await query<{ cnt: number }>(
+        `SELECT COUNT(*) AS cnt
+         FROM information_schema.STATISTICS
+         WHERE table_schema = DATABASE()
+           AND table_name   = 'swap_events'
+           AND index_name   = 'idx_swap_events_is_long_trade'`
+      );
+      if (!idxExists[0] || idxExists[0].cnt === 0) {
+        await ddl('CREATE INDEX idx_swap_events_is_long_trade ON swap_events(wallet_address, is_long_trade)');
+      }
+    },
+  },
+
+  {
     version: 3,
     name: 'widen_decimal_columns',
     // DECIMAL(20,6) suporta no máximo ~99 trilhões com 6 casas decimais.

@@ -8,15 +8,14 @@ import { config } from '../config';
 // Follow Score — Fórmula
 // ─────────────────────────────────────────────────────────────────────────────
 //
-//   follow_score = (win_rate_score * winRateWeight)
-//                + (holding_score  * holdingWeight)
+//   follow_score = (win_rate_score × winRateWeight)
+//                + (long_trade_rate × 100 × holdingWeight)
 //
-//   win_rate_score  = win_rate (0-100)
-//   holding_score:
-//     Se holding_avg >= scalpingThreshold → min(100, holding_avg / maxHolding * 100)
-//     Se holding_avg <  scalpingThreshold → penalidade proporcional (máx 50 pts)
+//   win_rate_score   = win_rate (0-100)
+//   long_trade_rate  = AVG(is_long_trade) = % de trades com holding >= threshold
+//                      (0.0 = todos scalping, 1.0 = todos longos)
 //
-// Pesos padrão: 50% win rate + 50% holding time
+// Pesos padrão: 50% win rate + 50% long_trade_rate
 // ─────────────────────────────────────────────────────────────────────────────
 
 /**
@@ -24,55 +23,37 @@ import { config } from '../config';
  */
 function calculateFollowScore(
   winRate: number,
-  holdingTimeAvgS: number | null
+  longTradeRate: number | null   // AVG(is_long_trade): 0.0 a 1.0
 ): number {
   const {
     followScoreWinRateWeight: winWeight,
     followScoreHoldingWeight: holdWeight,
-    followScoreMaxHoldingSeconds: maxHolding,
-    scalpingThresholdSeconds: scalpingThreshold,
   } = config.indexer;
 
   const winRateScore = Math.min(100, Math.max(0, winRate));
-
-  let holdingScore = 0;
-  if (holdingTimeAvgS !== null && holdingTimeAvgS > 0) {
-    if (holdingTimeAvgS < scalpingThreshold) {
-      holdingScore = (holdingTimeAvgS / scalpingThreshold) * 50;
-    } else {
-      holdingScore = Math.min(100, (holdingTimeAvgS / maxHolding) * 100);
-    }
-  }
+  // long_trade_rate já é uma fração 0-1; multiplicar por 100 para escalar a 0-100
+  const holdingScore = longTradeRate !== null
+    ? Math.min(100, Math.max(0, longTradeRate * 100))
+    : 0;
 
   const score = winRateScore * winWeight + holdingScore * holdWeight;
   return Math.round(Math.min(100, Math.max(0, score)) * 100) / 100;
 }
 
 /**
- * Gera a expressão SQL do follow score para ser usada diretamente nas queries.
- * Evita dependência do JOIN com kol_metrics (que pode falhar por diferença de period_start).
+ * Gera a expressão SQL do follow score para uso inline nas queries.
+ * Usa AVG(is_long_trade) em vez de AVG(holding_time_s) para evitar distorção por outliers.
  *
- * Parâmetros injetados diretamente (são constantes numéricas seguras, sem input do usuário):
- *   winWeight, holdWeight, maxHolding, scalpingThreshold
+ * long_trade_rate = AVG(is_long_trade) → 0.0 a 1.0
+ * holding_score   = long_trade_rate × 100 → 0 a 100
  */
-function followScoreSql(holdingAvgExpr: string, winRateExpr: string): string {
-  const { followScoreWinRateWeight: ww, followScoreHoldingWeight: hw,
-          followScoreMaxHoldingSeconds: maxH, scalpingThresholdSeconds: thr } = config.indexer;
+function followScoreSql(longTradeAvgExpr: string, winRateExpr: string): string {
+  const { followScoreWinRateWeight: ww, followScoreHoldingWeight: hw } = config.indexer;
 
-  // holding_score SQL:
-  //   Se avg_holding >= threshold → LEAST(100, avg_holding / maxH * 100)
-  //   Se avg_holding <  threshold → (avg_holding / threshold) * 50
-  //   Se NULL → 0
-  const holdingScoreSql = `
-    CASE
-      WHEN ${holdingAvgExpr} IS NULL OR ${holdingAvgExpr} <= 0 THEN 0
-      WHEN ${holdingAvgExpr} < ${thr}
-        THEN (${holdingAvgExpr} / ${thr}) * 50
-      ELSE LEAST(100, ${holdingAvgExpr} / ${maxH} * 100)
-    END`;
+  const holdingScoreSql = `COALESCE(${longTradeAvgExpr} * 100, 0)`;
 
   return `LEAST(100, GREATEST(0,
-    (${winRateExpr}) * ${ww}
+    COALESCE(${winRateExpr}, 0) * ${ww}
     + (${holdingScoreSql}) * ${hw}
   ))`;
 }
@@ -114,33 +95,32 @@ export async function calculateKolMetrics(
       losses: number;
       total_trades: number;
       profit_usd: number;
-      avg_trade_size: number;
       best_trade: number;
       worst_trade: number;
       unique_tokens: number;
       holding_time_avg: number | null;
+      long_trade_rate: number | null;   // AVG(is_long_trade): 0.0-1.0
       scalping_trades: number;
       total_invested_usd: number;
     }>(
       `SELECT
-         COUNT(CASE WHEN is_win = 1 THEN 1 END)                          AS wins,
-         COUNT(CASE WHEN is_win = 0 THEN 1 END)                          AS losses,
-         COUNT(*)                                                          AS total_trades,
-         COALESCE(SUM(pnl), 0)                                            AS profit_usd,
-         COALESCE(AVG(ABS(value_usd)), 0)                                 AS avg_trade_size,
-         COALESCE(MAX(pnl), 0)                                            AS best_trade,
-         COALESCE(MIN(pnl), 0)                                            AS worst_trade,
-         COUNT(DISTINCT token_out_address)                                AS unique_tokens,
-         AVG(holding_time_s)                                              AS holding_time_avg,
-         COUNT(CASE WHEN holding_time_s IS NOT NULL
-                     AND holding_time_s < ? THEN 1 END)                  AS scalping_trades,
+         COUNT(CASE WHEN is_win = 1 THEN 1 END)                              AS wins,
+         COUNT(CASE WHEN is_win = 0 THEN 1 END)                              AS losses,
+         COUNT(*)                                                              AS total_trades,
+         COALESCE(SUM(pnl), 0)                                                AS profit_usd,
+         COALESCE(MAX(pnl), 0)                                                AS best_trade,
+         COALESCE(MIN(pnl), 0)                                                AS worst_trade,
+         COUNT(DISTINCT token_out_address)                                    AS unique_tokens,
+         AVG(holding_time_s)                                                  AS holding_time_avg,
+         AVG(is_long_trade)                                                   AS long_trade_rate,
+         COUNT(CASE WHEN is_long_trade = 0 THEN 1 END)                       AS scalping_trades,
          COALESCE(SUM(CASE WHEN value_usd > 0 THEN value_usd ELSE 0 END), 0) AS total_invested_usd
        FROM swap_events
        WHERE wallet_address = ?
          AND timestamp >= ?
          AND timestamp <= ?
          AND pnl IS NOT NULL`,
-      [scalpingThreshold, walletAddress.toLowerCase(), periodStart, periodEnd]
+      [walletAddress.toLowerCase(), periodStart, periodEnd]
     );
 
     if (!stats.length) return null;
@@ -152,16 +132,21 @@ export async function calculateKolMetrics(
     const profitUsd = Number(s.profit_usd) || 0;
     const totalInvested = Number(s.total_invested_usd) || 0;
     const holdingTimeAvg = s.holding_time_avg !== null ? Math.round(Number(s.holding_time_avg)) : null;
+    const longTradeRate = s.long_trade_rate !== null ? Number(s.long_trade_rate) : null;
     const scalpingTrades = Number(s.scalping_trades) || 0;
 
     if (totalTrades < config.indexer.minTradesForKol) return null;
 
     const winRate = calculateWinRate(wins, totalTrades);
+    // scalping_rate: % de trades com is_long_trade = 0 (abaixo do threshold)
     const scalpingRate = totalTrades > 0
       ? Math.round((scalpingTrades / totalTrades) * 10000) / 100
       : 0;
-    const followScore = calculateFollowScore(winRate, holdingTimeAvg);
-    // profit_pct: lucro relativo ao capital investido no período
+    // long_trade_rate_pct: % de trades com is_long_trade = 1 (acima do threshold)
+    const longTradeRatePct = longTradeRate !== null
+      ? Math.round(longTradeRate * 10000) / 100
+      : 0;
+    const followScore = calculateFollowScore(winRate, longTradeRate);
     const profitPct = totalInvested > 0
       ? Math.round((profitUsd / totalInvested) * 10000) / 100
       : 0;
@@ -224,7 +209,7 @@ export async function calculateKolMetrics(
         metrics.worst_trade_pnl ?? null,
         metrics.unique_tokens_traded,
         holdingTimeAvg,
-        holdingTimeAvg, // median ≈ avg por ora
+        holdingTimeAvg,
         scalpingTrades,
         scalpingRate,
         followScore,
@@ -279,9 +264,8 @@ export async function updateAllKolMetrics(): Promise<void> {
 /**
  * Obtém o leaderboard para um período específico.
  *
- * O follow_score é calculado INLINE na query SQL para garantir que sempre
- * reflita os dados reais de swap_events, sem depender de um JOIN com
- * kol_metrics que pode falhar por diferença de period_start.
+ * follow_score calculado INLINE via AVG(is_long_trade) — sem JOIN com kol_metrics.
+ * long_trade_rate = AVG(is_long_trade) = % de trades com holding >= threshold (0.0-1.0)
  */
 export async function getLeaderboard(
   period: 'daily' | 'weekly' | 'monthly' | 'all_time',
@@ -289,12 +273,10 @@ export async function getLeaderboard(
   offset: number = 0
 ): Promise<LeaderboardEntry[]> {
   const periodStart = getPeriodStart(period);
-  const thr = config.indexer.scalpingThresholdSeconds;
 
-  // Expressões reutilizadas na query
-  const winRateExpr = `COUNT(CASE WHEN se.is_win = 1 THEN 1 END) * 100.0 / NULLIF(COUNT(*), 0)`;
-  const holdingAvgExpr = `AVG(se.holding_time_s)`;
-  const followScoreExpr = followScoreSql(holdingAvgExpr, winRateExpr);
+  const winRateExpr      = `COUNT(CASE WHEN se.is_win = 1 THEN 1 END) * 100.0 / NULLIF(COUNT(*), 0)`;
+  const longTradeAvgExpr = `AVG(se.is_long_trade)`;
+  const followScoreExpr  = followScoreSql(longTradeAvgExpr, winRateExpr);
 
   try {
     const results = await query<{
@@ -307,24 +289,25 @@ export async function getLeaderboard(
       total_invested_usd: number;
       win_rate: number;
       holding_time_avg_s: number | null;
+      long_trade_rate: number | null;
       scalping_rate: number;
       follow_score: number;
     }>(
       `SELECT
          se.wallet_address,
          w.label,
-         COUNT(CASE WHEN se.is_win = 1 THEN 1 END)                                  AS wins,
-         COUNT(CASE WHEN se.is_win = 0 THEN 1 END)                                  AS losses,
-         COUNT(*)                                                                     AS total_trades,
-         COALESCE(SUM(se.pnl), 0)                                                    AS profit_usd,
-         COALESCE(SUM(CASE WHEN se.value_usd > 0 THEN se.value_usd ELSE 0 END), 0)  AS total_invested_usd,
-         COALESCE(${winRateExpr}, 0)                                                 AS win_rate,
-         ${holdingAvgExpr}                                                            AS holding_time_avg_s,
+         COUNT(CASE WHEN se.is_win = 1 THEN 1 END)                                   AS wins,
+         COUNT(CASE WHEN se.is_win = 0 THEN 1 END)                                   AS losses,
+         COUNT(*)                                                                      AS total_trades,
+         COALESCE(SUM(se.pnl), 0)                                                     AS profit_usd,
+         COALESCE(SUM(CASE WHEN se.value_usd > 0 THEN se.value_usd ELSE 0 END), 0)   AS total_invested_usd,
+         COALESCE(${winRateExpr}, 0)                                                  AS win_rate,
+         AVG(se.holding_time_s)                                                        AS holding_time_avg_s,
+         ${longTradeAvgExpr}                                                           AS long_trade_rate,
          COALESCE(
-           COUNT(CASE WHEN se.holding_time_s IS NOT NULL
-                       AND se.holding_time_s < ${thr} THEN 1 END) * 100.0
-           / NULLIF(COUNT(*), 0), 0)                                                 AS scalping_rate,
-         COALESCE(${followScoreExpr}, 0)                                             AS follow_score
+           COUNT(CASE WHEN se.is_long_trade = 0 THEN 1 END) * 100.0
+           / NULLIF(COUNT(*), 0), 0)                                                  AS scalping_rate,
+         COALESCE(${followScoreExpr}, 0)                                              AS follow_score
        FROM swap_events se
        LEFT JOIN wallets w ON w.address = se.wallet_address
        WHERE se.timestamp >= ?
@@ -347,6 +330,10 @@ export async function getLeaderboard(
         ? Math.round((profitUsd / totalInvested) * 10000) / 100
         : 0;
 
+      const longTradeRate = row.long_trade_rate !== null
+        ? Math.round(Number(row.long_trade_rate) * 10000) / 100  // como percentual 0-100
+        : null;
+
       return {
         rank: offset + index + 1,
         wallet_address: row.wallet_address,
@@ -361,11 +348,13 @@ export async function getLeaderboard(
         period,
         holding_time_avg_s: holdingAvg,
         holding_time_formatted: holdingAvg ? formatHoldingTime(holdingAvg) : null,
+        long_trade_rate_pct: longTradeRate,   // % de trades com holding >= threshold
         scalping_rate: Math.round(Number(row.scalping_rate) * 100) / 100,
         follow_score: Math.round(Number(row.follow_score) * 100) / 100,
       } as LeaderboardEntry & {
         profit_pct: number;
         holding_time_formatted: string | null;
+        long_trade_rate_pct: number | null;
       };
     });
   } catch (error) {
@@ -396,6 +385,8 @@ export async function getKolDetails(walletAddress: string): Promise<{
     scalping_threshold_formatted: string;
     avg_holding_s: number | null;
     avg_holding_formatted: string | null;
+    long_trade_rate_pct: number | null;
+    scalping_rate_pct: number | null;
     follow_score: number;
     follow_score_label: string;
     profit_pct_all_time: number;
@@ -411,6 +402,7 @@ export async function getKolDetails(walletAddress: string): Promise<{
     is_win: boolean | null;
     holding_time_s: number | null;
     holding_time_formatted: string | null;
+    is_long_trade: number | null;
   }>;
 } | null> {
   const normalizedAddress = walletAddress.toLowerCase();
@@ -435,28 +427,27 @@ export async function getKolDetails(walletAddress: string): Promise<{
     calculateKolMetrics(normalizedAddress, 'all_time'),
   ]);
 
-  // Calcular follow_score e profit_pct inline (sem depender de kol_metrics)
-  const thr = config.indexer.scalpingThresholdSeconds;
-  const winRateExpr = `COUNT(CASE WHEN is_win = 1 THEN 1 END) * 100.0 / NULLIF(COUNT(*), 0)`;
-  const holdingAvgExpr = `AVG(holding_time_s)`;
-  const followScoreExpr = followScoreSql(holdingAvgExpr, winRateExpr);
+  const winRateExpr      = `COUNT(CASE WHEN is_win = 1 THEN 1 END) * 100.0 / NULLIF(COUNT(*), 0)`;
+  const longTradeAvgExpr = `AVG(is_long_trade)`;
+  const followScoreExpr  = followScoreSql(longTradeAvgExpr, winRateExpr);
 
   const liveStats = await query<{
     holding_time_avg_s: number | null;
+    long_trade_rate: number | null;
+    scalping_rate: number;
     follow_score: number;
     total_invested_usd: number;
     profit_usd: number;
-    scalping_rate: number;
   }>(
     `SELECT
-       ${holdingAvgExpr}                                                              AS holding_time_avg_s,
-       COALESCE(${followScoreExpr}, 0)                                               AS follow_score,
-       COALESCE(SUM(CASE WHEN value_usd > 0 THEN value_usd ELSE 0 END), 0)           AS total_invested_usd,
-       COALESCE(SUM(pnl), 0)                                                          AS profit_usd,
+       AVG(holding_time_s)                                                              AS holding_time_avg_s,
+       ${longTradeAvgExpr}                                                              AS long_trade_rate,
        COALESCE(
-         COUNT(CASE WHEN holding_time_s IS NOT NULL
-                     AND holding_time_s < ${thr} THEN 1 END) * 100.0
-         / NULLIF(COUNT(*), 0), 0)                                                    AS scalping_rate
+         COUNT(CASE WHEN is_long_trade = 0 THEN 1 END) * 100.0
+         / NULLIF(COUNT(*), 0), 0)                                                      AS scalping_rate,
+       COALESCE(${followScoreExpr}, 0)                                                  AS follow_score,
+       COALESCE(SUM(CASE WHEN value_usd > 0 THEN value_usd ELSE 0 END), 0)             AS total_invested_usd,
+       COALESCE(SUM(pnl), 0)                                                            AS profit_usd
      FROM swap_events
      WHERE wallet_address = ?
        AND pnl IS NOT NULL`,
@@ -469,6 +460,10 @@ export async function getKolDetails(walletAddress: string): Promise<{
   const followScore = liveStats[0]?.follow_score
     ? Math.round(Number(liveStats[0].follow_score) * 100) / 100
     : 0;
+  const longTradeRate = liveStats[0]?.long_trade_rate !== null
+    ? Math.round(Number(liveStats[0].long_trade_rate) * 10000) / 100
+    : null;
+  const scalpingRate = Math.round(Number(liveStats[0]?.scalping_rate || 0) * 100) / 100;
   const totalInvested = Number(liveStats[0]?.total_invested_usd) || 0;
   const profitUsd = Number(liveStats[0]?.profit_usd) || 0;
   const profitPct = totalInvested > 0
@@ -492,9 +487,10 @@ export async function getKolDetails(walletAddress: string): Promise<{
     pnl: number | null;
     is_win: boolean | null;
     holding_time_s: number | null;
+    is_long_trade: number | null;
   }>(
     `SELECT tx_hash, timestamp, dex_name, token_in_symbol, token_out_symbol,
-            value_usd, pnl, is_win, holding_time_s
+            value_usd, pnl, is_win, holding_time_s, is_long_trade
      FROM swap_events
      WHERE wallet_address = ?
      ORDER BY timestamp DESC
@@ -503,7 +499,6 @@ export async function getKolDetails(walletAddress: string): Promise<{
   );
 
   const wallet = walletData[0];
-  const scalpingThreshold = config.indexer.scalpingThresholdSeconds;
 
   return {
     wallet: {
@@ -515,10 +510,12 @@ export async function getKolDetails(walletAddress: string): Promise<{
     },
     metrics: { daily, weekly, monthly, all_time },
     holding_analysis: {
-      scalping_threshold_s: scalpingThreshold,
-      scalping_threshold_formatted: formatHoldingTime(scalpingThreshold),
+      scalping_threshold_s: config.indexer.scalpingThresholdSeconds,
+      scalping_threshold_formatted: formatHoldingTime(config.indexer.scalpingThresholdSeconds),
       avg_holding_s: avgHolding,
       avg_holding_formatted: avgHolding ? formatHoldingTime(avgHolding) : null,
+      long_trade_rate_pct: longTradeRate,
+      scalping_rate_pct: scalpingRate,
       follow_score: followScore,
       follow_score_label: followScoreLabel,
       profit_pct_all_time: profitPct,
