@@ -2,7 +2,6 @@ import { Request, Response, NextFunction } from 'express';
 import { getKolDetails, getPlatformStats } from '../../services/metrics-service';
 import { query } from '../../database/connection';
 import { ApiResponse } from '../../types';
-import { logger } from '../../utils/logger';
 import { AppError } from '../middleware/error-handler';
 import { config } from '../../config';
 
@@ -37,8 +36,7 @@ export async function getKolDetailsHandler(
 
     kolDetailsCache.set(cacheKey, { data: details, timestamp: Date.now() });
 
-    const response: ApiResponse<typeof details> = { success: true, data: details };
-    res.json(response);
+    res.json({ success: true, data: details } as ApiResponse<typeof details>);
   } catch (error) {
     next(error);
   }
@@ -47,6 +45,10 @@ export async function getKolDetailsHandler(
 /**
  * GET /api/kol/:address/transactions
  * Retorna o histórico de transações de um KOL
+ *
+ * Nota: LIMIT e OFFSET são interpolados diretamente na SQL porque o mysql2
+ * não suporta esses valores como parâmetros de prepared statements.
+ * Os valores são sanitizados via parseInt + Math.min/max antes da interpolação.
  */
 export async function getKolTransactionsHandler(
   req: Request,
@@ -60,7 +62,6 @@ export async function getKolTransactionsHandler(
     const offset = (page - 1) * limit;
     const period = req.query.period as string;
 
-    // MySQL usa INTERVAL N UNIT sem aspas
     let dateFilter = '';
     if (period === 'daily') {
       dateFilter = 'AND se.timestamp >= NOW() - INTERVAL 24 HOUR';
@@ -90,8 +91,8 @@ export async function getKolTransactionsHandler(
        WHERE wallet_address = ?
        ${dateFilter}
        ORDER BY timestamp DESC
-       LIMIT ? OFFSET ?`,
-      [address, limit, offset]
+       LIMIT ${limit} OFFSET ${offset}`,
+      [address]
     );
 
     const countResult = await query<{ total: number }>(
@@ -101,13 +102,11 @@ export async function getKolTransactionsHandler(
 
     const total = Number(countResult[0]?.total) || 0;
 
-    const response: ApiResponse<typeof transactions> = {
+    res.json({
       success: true,
       data: transactions,
       pagination: { page, limit, total, total_pages: Math.ceil(total / limit) },
-    };
-
-    res.json(response);
+    } as ApiResponse<typeof transactions>);
   } catch (error) {
     next(error);
   }
@@ -150,8 +149,8 @@ export async function getKolSwapsHandler(
        FROM swap_events
        WHERE wallet_address = ?
        ORDER BY timestamp DESC
-       LIMIT ? OFFSET ?`,
-      [address, limit, offset]
+       LIMIT ${limit} OFFSET ${offset}`,
+      [address]
     );
 
     const countResult = await query<{ total: number }>(
@@ -161,13 +160,11 @@ export async function getKolSwapsHandler(
 
     const total = Number(countResult[0]?.total) || 0;
 
-    const response: ApiResponse<typeof swaps> = {
+    res.json({
       success: true,
       data: swaps,
       pagination: { page, limit, total, total_pages: Math.ceil(total / limit) },
-    };
-
-    res.json(response);
+    } as ApiResponse<typeof swaps>);
   } catch (error) {
     next(error);
   }
@@ -208,7 +205,6 @@ export async function searchWalletHandler(
 
     const searchTerm = `%${q.toLowerCase().trim()}%`;
 
-    // MySQL usa LIKE (case-insensitive por padrão com utf8mb4_general_ci)
     const results = await query<{
       address: string;
       label: string | null;
@@ -259,8 +255,8 @@ export async function getTopTokensHandler(
          AND token_out_symbol != 'UNKNOWN'
        GROUP BY token_out_address, token_out_symbol
        ORDER BY COUNT(*) DESC
-       LIMIT ?`,
-      [limit]
+       LIMIT ${limit}`,
+      []
     );
 
     res.json({ success: true, data: tokens } as ApiResponse<typeof tokens>);

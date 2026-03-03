@@ -190,8 +190,8 @@ export async function getLeaderboard(
        GROUP BY se.wallet_address, w.label
        HAVING COUNT(*) >= ?
        ORDER BY SUM(se.pnl) DESC
-       LIMIT ? OFFSET ?`,
-      [periodStart, config.indexer.minTradesForKol, limit, offset]
+       LIMIT ${limit} OFFSET ${offset}`,
+      [periodStart, config.indexer.minTradesForKol]
     );
 
     return results.map((row, index) => ({
@@ -277,7 +277,7 @@ export async function getKolDetails(walletAddress: string): Promise<{
      WHERE wallet_address = ?
      ORDER BY timestamp DESC
      LIMIT 50`,
-    [normalizedAddress]
+    [normalizedAddress] // LIMIT sem parâmetro: valor fixo inline é seguro
   );
 
   const wallet = walletData[0];
