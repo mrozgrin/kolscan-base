@@ -618,6 +618,94 @@ const migrations: Array<{
       await ddl(`ALTER TABLE kol_metrics MODIFY COLUMN pnl_profit_factor DECIMAL(12,2) DEFAULT NULL`);
     },
   },
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Migration 9: modelo de posição — PnL real calculado entre compra e venda
+  //
+  // Conceito:
+  //   Cada vez que a wallet compra um token (ex: WETH → XYZCOIN), abre ou
+  //   aumenta uma posição. O custo de entrada é acumulado em "custo médio
+  //   ponderado" (VWAP) na moeda base (ex: WETH).
+  //
+  //   Quando a wallet vende (XYZCOIN → WETH), o PnL é calculado como:
+  //     pnl_base = qty_vendida × avg_cost_base_per_token
+  //     pnl_base = valor_recebido_base - custo_proporcional_base
+  //
+  //   O resultado é registrado na moeda base (ex: WETH), não em USD.
+  //   O valor em USD é registrado adicionalmente para fins de leaderboard.
+  //
+  // Tabela positions:
+  //   Rastreia posições abertas por (wallet, token).
+  //   Atualizada a cada compra (acumula) e a cada venda (reduz).
+  //
+  // Colunas adicionadas em swap_events:
+  //   pnl_base        — PnL na moeda base (null em compras, valor real em vendas)
+  //   pnl_base_token  — Endereço da moeda base em que o PnL foi registrado
+  //   pnl_base_symbol — Símbolo da moeda base (ex: WETH, USDC)
+  //   swap_type       — 'buy' | 'sell' | 'swap' (troca entre dois não-base)
+  // ───────────────────────────────────────────────────────────────────────────
+  {
+    version: 9,
+    name: 'add_positions_and_base_pnl',
+    async up() {
+      // ── Tabela positions ──────────────────────────────────────────────────
+      await ddl(`
+        CREATE TABLE IF NOT EXISTS positions (
+          wallet_address      VARCHAR(42)    NOT NULL,
+          token_address       VARCHAR(42)    NOT NULL,
+          base_token_address  VARCHAR(42)    NOT NULL COMMENT 'Moeda base da posição (ex: WETH)',
+          base_token_symbol   VARCHAR(20)    NOT NULL DEFAULT '' COMMENT 'Símbolo da moeda base',
+          qty_open            DECIMAL(65,18) NOT NULL DEFAULT 0 COMMENT 'Quantidade do token ainda em carteira',
+          cost_basis_base     DECIMAL(65,18) NOT NULL DEFAULT 0 COMMENT 'Custo total de entrada na moeda base',
+          avg_cost_base       DECIMAL(65,18) NOT NULL DEFAULT 0 COMMENT 'Custo médio por unidade do token na moeda base',
+          opened_at           DATETIME       NOT NULL,
+          last_updated        DATETIME       NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          PRIMARY KEY (wallet_address, token_address),
+          CONSTRAINT fk_pos_wallet FOREIGN KEY (wallet_address) REFERENCES wallets(address)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+      `);
+
+      // ── Índices em positions ──────────────────────────────────────────────
+      const posIdxs = await query<{ INDEX_NAME: string }>(
+        `SELECT DISTINCT INDEX_NAME FROM information_schema.STATISTICS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'positions'`
+      );
+      const posIdx = new Set(posIdxs.map((r) => r.INDEX_NAME));
+      if (!posIdx.has('idx_positions_wallet'))
+        await ddl(`CREATE INDEX idx_positions_wallet ON positions(wallet_address)`);
+      if (!posIdx.has('idx_positions_token'))
+        await ddl(`CREATE INDEX idx_positions_token ON positions(token_address)`);
+
+      // ── Novas colunas em swap_events ──────────────────────────────────────
+      const seCols = await query<{ COLUMN_NAME: string }>(
+        `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'swap_events'`
+      );
+      const seC = new Set(seCols.map((r) => r.COLUMN_NAME));
+
+      if (!seC.has('pnl_base'))
+        await ddl(`ALTER TABLE swap_events ADD COLUMN pnl_base DECIMAL(65,18) DEFAULT NULL
+          COMMENT 'PnL na moeda base (null em compras, valor real em vendas)'`);
+      if (!seC.has('pnl_base_token'))
+        await ddl(`ALTER TABLE swap_events ADD COLUMN pnl_base_token VARCHAR(42) DEFAULT NULL
+          COMMENT 'Endereço da moeda base em que o PnL foi registrado'`);
+      if (!seC.has('pnl_base_symbol'))
+        await ddl(`ALTER TABLE swap_events ADD COLUMN pnl_base_symbol VARCHAR(20) DEFAULT NULL
+          COMMENT 'Símbolo da moeda base (ex: WETH, USDC)'`);
+      if (!seC.has('swap_type'))
+        await ddl(`ALTER TABLE swap_events ADD COLUMN swap_type VARCHAR(10) DEFAULT NULL
+          COMMENT 'buy | sell | swap'`);
+
+      // ── Índice para acelerar queries de PnL por período ───────────────────
+      const seIdxs = await query<{ INDEX_NAME: string }>(
+        `SELECT DISTINCT INDEX_NAME FROM information_schema.STATISTICS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'swap_events'`
+      );
+      const seIdx = new Set(seIdxs.map((r) => r.INDEX_NAME));
+      if (!seIdx.has('idx_se_swap_type'))
+        await ddl(`CREATE INDEX idx_se_swap_type ON swap_events(wallet_address, swap_type, timestamp)`);
+    },
+  },
 ];
 
 export async function runMigrations(): Promise<void> {

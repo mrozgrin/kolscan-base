@@ -134,28 +134,39 @@ async function processTransaction(
   );
 }
 
+// Tokens considerados "moeda base" — usados como referência de valor nas posições.
+// Quando token_in é um desses, o swap é uma COMPRA do token_out.
+// Quando token_out é um desses, o swap é uma VENDA do token_in.
+const BASE_TOKENS = new Set([
+  '0x4200000000000000000000000000000000000006', // WETH (Base)
+  '0x833589fcd6edb6e08f4c7c32d4f71b54bda02913', // USDC (Base)
+  '0xfde4c96c8593536e31f229ea8f37b2ada2699bb2', // USDT (Base)
+  '0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca', // USDbC (Base)
+]);
+
 /**
  * Calcula o tempo de holding em segundos para um token.
- * Busca o swap de compra mais recente do mesmo token pela mesma carteira
+ * Busca a compra mais recente do mesmo token pela mesma carteira
  * e retorna a diferença de tempo em segundos.
  * Retorna null se não houver compra anterior registrada.
  */
 async function calculateHoldingTime(
   walletAddress: string,
-  tokenOutAddress: string, // token que está sendo vendido agora (era token_out na compra)
+  tokenSoldAddress: string, // token que está sendo vendido agora
   currentTimestamp: Date
 ): Promise<number | null> {
   try {
-    // Buscar o swap mais recente onde este token foi comprado (token_out) pela mesma carteira
+    // Buscar o swap mais recente onde este token foi comprado (swap_type='buy')
     const result = await query<{ timestamp: Date }>(
       `SELECT timestamp
        FROM swap_events
        WHERE wallet_address    = ?
          AND token_out_address = ?
+         AND swap_type         = 'buy'
          AND timestamp        < ?
        ORDER BY timestamp DESC
        LIMIT 1`,
-      [walletAddress, tokenOutAddress, currentTimestamp]
+      [walletAddress, tokenSoldAddress, currentTimestamp]
     );
 
     if (!result.length) return null;
@@ -174,70 +185,225 @@ async function calculateHoldingTime(
 }
 
 /**
- * Processa um evento de swap e calcula PnL e holding time
+ * Atualiza (ou cria) a posição aberta de uma wallet para um token.
+ * Retorna o custo médio por unidade na moeda base ANTES da atualização
+ * (necessário para calcular o PnL proporcional em vendas parciais).
+ *
+ * @param walletAddress  Endereço da wallet
+ * @param tokenAddress   Token da posição (ex: XYZCOIN)
+ * @param baseAddress    Moeda base (ex: WETH)
+ * @param baseSymbol     Símbolo da moeda base
+ * @param qtyDelta       +quantidade (compra) ou -quantidade (venda)
+ * @param costDelta      +custo em base (compra) ou 0 (venda — custo é deduzido proporcionalmente)
+ * @param openedAt       Timestamp da abertura (usado apenas na criação da posição)
+ * @returns              { avgCostBefore, costBasisBefore } — valores ANTES da atualização
+ */
+async function updatePosition(
+  walletAddress: string,
+  tokenAddress: string,
+  baseAddress: string,
+  baseSymbol: string,
+  qtyDelta: number,
+  costDelta: number,
+  openedAt: Date
+): Promise<{ avgCostBefore: number; costBasisBefore: number }> {
+  // Buscar posição atual
+  const rows = await query<{ qty_open: string; cost_basis_base: string; avg_cost_base: string }>(
+    `SELECT qty_open, cost_basis_base, avg_cost_base
+     FROM positions
+     WHERE wallet_address = ? AND token_address = ?`,
+    [walletAddress, tokenAddress]
+  );
+
+  const qtyBefore      = rows.length ? parseFloat(rows[0].qty_open)        : 0;
+  const costBefore     = rows.length ? parseFloat(rows[0].cost_basis_base) : 0;
+  const avgCostBefore  = rows.length ? parseFloat(rows[0].avg_cost_base)   : 0;
+
+  const qtyAfter  = Math.max(0, qtyBefore  + qtyDelta);
+  const costAfter = qtyDelta > 0
+    // Compra: acumula custo
+    ? costBefore + costDelta
+    // Venda: reduz custo proporcionalmente ao percentual vendido
+    : qtyBefore > 0 ? costBefore * (qtyAfter / qtyBefore) : 0;
+
+  const avgCostAfter = qtyAfter > 0 ? costAfter / qtyAfter : 0;
+
+  if (rows.length === 0) {
+    // Criar nova posição
+    await execute(
+      `INSERT INTO positions
+         (wallet_address, token_address, base_token_address, base_token_symbol,
+          qty_open, cost_basis_base, avg_cost_base, opened_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      [walletAddress, tokenAddress, baseAddress, baseSymbol,
+       qtyAfter, costAfter, avgCostAfter, openedAt]
+    );
+  } else {
+    // Atualizar posição existente
+    await execute(
+      `UPDATE positions
+       SET qty_open = ?, cost_basis_base = ?, avg_cost_base = ?,
+           base_token_address = ?, base_token_symbol = ?, last_updated = NOW()
+       WHERE wallet_address = ? AND token_address = ?`,
+      [qtyAfter, costAfter, avgCostAfter,
+       baseAddress, baseSymbol,
+       walletAddress, tokenAddress]
+    );
+  }
+
+  return { avgCostBefore, costBasisBefore: costBefore };
+}
+
+/**
+ * Processa um evento de swap, calcula PnL por posição na moeda base e holding time.
+ *
+ * Lógica de classificação:
+ *   BUY  — token_in é moeda base (ex: WETH → XYZCOIN)
+ *          Abre/aumenta posição. PnL = null.
+ *
+ *   SELL — token_out é moeda base (ex: XYZCOIN → WETH)
+ *          Fecha/reduz posição.
+ *          pnl_base = valor_recebido_base − (avg_cost_base × qty_vendida)
+ *
+ *   SWAP — nenhum dos lados é moeda base (ex: XYZCOIN → ABCCOIN)
+ *          Fecha posição do token_in (sem PnL em base) e abre posição do token_out.
+ *          pnl_base = null (não há moeda base para registrar o lucro).
  */
 async function processSwapEvent(
   swapEvent: SwapEvent,
   walletAddress: string
 ): Promise<void> {
-  // Obter informações dos tokens
+  // ── Informações e decimais dos tokens ──────────────────────────────────────
   const [tokenInInfo, tokenOutInfo] = await Promise.all([
     getTokenInfo(swapEvent.token_in_address),
     getTokenInfo(swapEvent.token_out_address),
   ]);
 
-  const tokenInSymbol  = tokenInInfo?.symbol   || 'UNKNOWN';
-  const tokenOutSymbol = tokenOutInfo?.symbol  || 'UNKNOWN';
+  const tokenInSymbol    = tokenInInfo?.symbol   || 'UNKNOWN';
+  const tokenOutSymbol   = tokenOutInfo?.symbol  || 'UNKNOWN';
   const tokenInDecimals  = tokenInInfo?.decimals  || 18;
   const tokenOutDecimals = tokenOutInfo?.decimals || 18;
 
-  // Calcular valor em USD
+  const tokenInAmount  = parseFloat(swapEvent.token_in_amount)  / Math.pow(10, tokenInDecimals);
+  const tokenOutAmount = parseFloat(swapEvent.token_out_amount) / Math.pow(10, tokenOutDecimals);
+
+  // ── Preços em USD (mantidos para fins de leaderboard/métricas) ─────────────
   const [tokenInPrice, tokenOutPrice] = await Promise.all([
     getTokenPrice(swapEvent.token_in_address),
     getTokenPrice(swapEvent.token_out_address),
   ]);
 
-  const tokenInAmount  = parseFloat(swapEvent.token_in_amount)  / Math.pow(10, tokenInDecimals);
-  const tokenOutAmount = parseFloat(swapEvent.token_out_amount) / Math.pow(10, tokenOutDecimals);
-
   const valueInUsd  = tokenInPrice  ? tokenInAmount  * tokenInPrice  : null;
   const valueOutUsd = tokenOutPrice ? tokenOutAmount * tokenOutPrice : null;
+  // value_usd representa o valor de entrada (custo) em USD
+  const valueUsd = valueInUsd;
 
-  // Calcular PnL (valor saída - valor entrada)
-  let pnl: number | null = null;
-  let isWin: boolean | null = null;
+  // ── Classificar o tipo de swap ─────────────────────────────────────────────
+  const inIsBase  = BASE_TOKENS.has(swapEvent.token_in_address.toLowerCase());
+  const outIsBase = BASE_TOKENS.has(swapEvent.token_out_address.toLowerCase());
 
-  if (valueInUsd !== null && valueOutUsd !== null) {
-    pnl = valueOutUsd - valueInUsd;
-    isWin = pnl > 0;
+  let swapType: 'buy' | 'sell' | 'swap';
+  if (inIsBase && !outIsBase)       swapType = 'buy';
+  else if (!inIsBase && outIsBase)  swapType = 'sell';
+  else                              swapType = 'swap'; // base→base ou meme→meme
+
+  // ── PnL na moeda base ──────────────────────────────────────────────────────
+  let pnlBase:       number | null = null;
+  let pnlBaseToken:  string | null = null;
+  let pnlBaseSymbol: string | null = null;
+  // pnl em USD (legado — mantido para compatibilidade com métricas existentes)
+  let pnl:    number | null = null;
+  let isWin:  boolean | null = null;
+
+  if (swapType === 'buy') {
+    // ── COMPRA: abre/aumenta posição ────────────────────────────────────────
+    // Custo de entrada = quantidade de moeda base gasta (token_in_amount)
+    await updatePosition(
+      walletAddress,
+      swapEvent.token_out_address,   // token que está sendo comprado
+      swapEvent.token_in_address,    // moeda base usada para comprar
+      tokenInSymbol,
+      tokenOutAmount,                // qty comprada do token_out
+      tokenInAmount,                 // custo em moeda base
+      swapEvent.timestamp
+    );
+    // PnL é null em compras — posição ainda aberta
+
+  } else if (swapType === 'sell') {
+    // ── VENDA: fecha/reduz posição e calcula PnL na moeda base ──────────────
+    const { avgCostBefore } = await updatePosition(
+      walletAddress,
+      swapEvent.token_in_address,    // token que está sendo vendido
+      swapEvent.token_out_address,   // moeda base recebida
+      tokenOutSymbol,
+      -tokenInAmount,                // qty vendida (negativo = redução)
+      0,                             // custo deduzido proporcionalmente dentro de updatePosition
+      swapEvent.timestamp
+    );
+
+    // PnL na moeda base:
+    //   valor recebido (token_out_amount em base) − custo proporcional (avg_cost × qty_vendida)
+    const costProporcional = avgCostBefore * tokenInAmount;
+    pnlBase       = tokenOutAmount - costProporcional;
+    pnlBaseToken  = swapEvent.token_out_address;
+    pnlBaseSymbol = tokenOutSymbol;
+    isWin         = pnlBase > 0;
+
+    // PnL em USD (para métricas de leaderboard)
+    if (valueInUsd !== null && valueOutUsd !== null) {
+      pnl = valueOutUsd - (avgCostBefore * tokenInAmount * (tokenInPrice || 0) / (tokenInPrice || 1));
+      // Simplificação: se temos preço de ambos, usa a diferença USD direta ponderada pelo custo médio
+      // Para o leaderboard, o sinal de is_win já vem do pnl_base
+      pnl = valueOutUsd - (costProporcional * (tokenInPrice || tokenOutPrice || 1));
+    }
+
+  } else {
+    // ── SWAP meme→meme: fecha posição do token_in sem PnL em base ───────────
+    // Fecha posição do token vendido (sem base para registrar lucro)
+    await updatePosition(
+      walletAddress,
+      swapEvent.token_in_address,
+      swapEvent.token_in_address, // placeholder — não há base real
+      tokenInSymbol,
+      -tokenInAmount,
+      0,
+      swapEvent.timestamp
+    );
+    // Abre posição do token comprado usando valor USD como proxy de custo
+    if (valueInUsd !== null) {
+      await updatePosition(
+        walletAddress,
+        swapEvent.token_out_address,
+        swapEvent.token_in_address, // moeda "base" é o token vendido (proxy)
+        tokenInSymbol,
+        tokenOutAmount,
+        valueInUsd,
+        swapEvent.timestamp
+      );
+    }
   }
 
-  // Calcular holding time: quanto tempo o trader ficou com o token_in antes de vender
-  // (token_in neste swap = token que foi comprado em swap anterior)
-  const holdingTimeS = await calculateHoldingTime(
-    walletAddress,
-    swapEvent.token_in_address,
-    swapEvent.timestamp
-  );
+  // ── Holding time ───────────────────────────────────────────────────────────
+  // Calculado apenas em vendas (quando o token_in foi previamente comprado)
+  const holdingTimeS = (swapType === 'sell' || swapType === 'swap')
+    ? await calculateHoldingTime(walletAddress, swapEvent.token_in_address, swapEvent.timestamp)
+    : null;
 
-  // is_long_trade: flag binária que indica se o trade durou mais que o limiar de scalping.
-  //   1   = trade longo (holding >= threshold) — bom para o follow score
-  //   0   = scalping   (holding <  threshold) — penaliza o follow score
-  //   null = sem compra anterior registrada — ignorado na média
   const scalpingThreshold = config.indexer.scalpingThresholdSeconds;
   const isLongTrade = holdingTimeS === null
     ? null
     : holdingTimeS >= scalpingThreshold ? 1 : 0;
 
-  // Salvar evento de swap
+  // ── Salvar evento de swap ──────────────────────────────────────────────────
   await execute(
     `INSERT IGNORE INTO swap_events (
        tx_hash, block_number, timestamp, wallet_address, dex_address, dex_name,
        token_in_address, token_in_symbol, token_in_amount,
        token_out_address, token_out_symbol, token_out_amount,
-       value_usd, pnl, is_win, holding_time_s, is_long_trade
+       value_usd, pnl, is_win, holding_time_s, is_long_trade,
+       pnl_base, pnl_base_token, pnl_base_symbol, swap_type
      )
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       swapEvent.tx_hash,
       swapEvent.block_number,
@@ -251,11 +417,15 @@ async function processSwapEvent(
       swapEvent.token_out_address,
       tokenOutSymbol,
       swapEvent.token_out_amount,
-      valueInUsd,
+      valueUsd,
       pnl,
       isWin === null ? null : (isWin ? 1 : 0),
       holdingTimeS,
       isLongTrade,
+      pnlBase,
+      pnlBaseToken,
+      pnlBaseSymbol,
+      swapType,
     ]
   );
 }

@@ -207,6 +207,12 @@ export interface KolDetails {
     holding_time_s: number | null;
     holding_time_formatted: string | null;
     is_long_trade: number | null;
+    /** PnL real na moeda base (ex: WETH). Disponível apenas em vendas (swap_type='sell'). */
+    pnl_base: number | null;
+    /** Símbolo da moeda base em que o PnL foi registrado (ex: 'WETH', 'USDC'). */
+    pnl_base_symbol: string | null;
+    /** Tipo do swap: 'buy' (compra), 'sell' (venda) ou 'swap' (meme→meme). */
+    swap_type: string | null;
   }>;
 }
 

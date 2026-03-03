@@ -108,21 +108,52 @@ async function computeFollowScore(wallet: string, periodDays: number): Promise<S
   const consistency = wrStability*0.40 + pnlStability*0.35 + diversScore*0.25;
 
   // BLOCO 3: PnL
+  // Usa pnl_base (PnL real na moeda base) apenas em swaps do tipo 'sell'.
+  // O pnl_base é null em compras e em swaps meme→meme, portanto só conta
+  // quando a posição foi efetivamente fechada contra uma moeda base.
+  // Para o leaderboard (que precisa de USD), converte via preço atual do token base.
+  // Como o preço histórico não está armazenado, usamos pnl (USD) como fallback
+  // quando pnl_base não está disponível (dados anteriores à migration 9).
   const pnlRows = await query<{ total_pnl: number; gross_profit: number; gross_loss: number }>(
-    `SELECT COALESCE(SUM(pnl),0) AS total_pnl,
-            COALESCE(SUM(CASE WHEN is_win=1 THEN pnl ELSE 0 END),0) AS gross_profit,
-            COALESCE(SUM(CASE WHEN is_win=0 THEN ABS(pnl) ELSE 0 END),0) AS gross_loss
-     FROM swap_events WHERE wallet_address=? AND is_long_trade=1 AND timestamp>=DATE_SUB(NOW(),INTERVAL ? DAY)`,
+    `SELECT
+       COALESCE(SUM(
+         CASE WHEN pnl_base IS NOT NULL THEN pnl_base * COALESCE(
+           (SELECT price_usd FROM tokens WHERE address = se.pnl_base_token LIMIT 1), 1
+         ) ELSE pnl END
+       ), 0) AS total_pnl,
+       COALESCE(SUM(CASE WHEN is_win=1 THEN
+         CASE WHEN pnl_base IS NOT NULL THEN pnl_base * COALESCE(
+           (SELECT price_usd FROM tokens WHERE address = se.pnl_base_token LIMIT 1), 1
+         ) ELSE pnl END
+       ELSE 0 END), 0) AS gross_profit,
+       COALESCE(SUM(CASE WHEN is_win=0 THEN ABS(
+         CASE WHEN pnl_base IS NOT NULL THEN pnl_base * COALESCE(
+           (SELECT price_usd FROM tokens WHERE address = se.pnl_base_token LIMIT 1), 1
+         ) ELSE pnl END
+       ) ELSE 0 END), 0) AS gross_loss
+     FROM swap_events se
+     WHERE se.wallet_address=?
+       AND se.is_long_trade=1
+       AND (se.swap_type='sell' OR se.swap_type IS NULL)
+       AND se.timestamp>=DATE_SUB(NOW(),INTERVAL ? DAY)`,
     [wallet, periodDays]
   );
   const totalPnl = Number(pnlRows[0]?.total_pnl)||0;
   const grossProfit = Number(pnlRows[0]?.gross_profit)||0;
   const grossLoss = Number(pnlRows[0]?.gross_loss)||0;
 
-  // P90 do pool completo
+  // P90 do pool completo (usando mesma lógica de pnl_base com fallback para pnl)
   const allPnlRows = await query<{ pnl_sum: number }>(
-    `SELECT SUM(pnl) AS pnl_sum FROM swap_events WHERE is_long_trade=1 AND timestamp>=DATE_SUB(NOW(),INTERVAL ? DAY)
-     GROUP BY wallet_address ORDER BY pnl_sum`,
+    `SELECT SUM(
+       CASE WHEN pnl_base IS NOT NULL THEN pnl_base * COALESCE(
+         (SELECT price_usd FROM tokens WHERE address = se.pnl_base_token LIMIT 1), 1
+       ) ELSE pnl END
+     ) AS pnl_sum
+     FROM swap_events se
+     WHERE se.is_long_trade=1
+       AND (se.swap_type='sell' OR se.swap_type IS NULL)
+       AND se.timestamp>=DATE_SUB(NOW(),INTERVAL ? DAY)
+     GROUP BY se.wallet_address ORDER BY pnl_sum`,
     [periodDays]
   );
   let p90Pnl = 1;
@@ -185,16 +216,26 @@ export async function updateKolMetrics(wallet: string): Promise<void> {
         holding_time_avg_s: number; scalping_rate: number; long_trade_rate: number;
         best_trade_pnl: number; worst_trade_pnl: number; total_invested_usd: number;
       }>(
-        `SELECT SUM(CASE WHEN is_win=1 THEN 1 ELSE 0 END) AS wins,
+        `SELECT
+                SUM(CASE WHEN is_win=1 THEN 1 ELSE 0 END) AS wins,
                 SUM(CASE WHEN is_win=0 THEN 1 ELSE 0 END) AS losses,
-                COUNT(*) AS total_trades, COALESCE(SUM(pnl),0) AS profit_usd,
+                COUNT(*) AS total_trades,
+                -- profit_usd: usa pnl_base convertido para USD quando disponível (swap_type='sell'),
+                -- caso contrário usa pnl legado (dados anteriores à migration 9)
+                COALESCE(SUM(
+                  CASE WHEN pnl_base IS NOT NULL THEN pnl_base * COALESCE(
+                    (SELECT price_usd FROM tokens WHERE address = se.pnl_base_token LIMIT 1), 1
+                  ) ELSE pnl END
+                ), 0) AS profit_usd,
                 COALESCE(SUM(CASE WHEN is_win=1 THEN 1 ELSE 0 END)/NULLIF(COUNT(*),0)*100,0) AS win_rate,
                 COALESCE(AVG(holding_time_s),0) AS holding_time_avg_s,
                 COALESCE(SUM(CASE WHEN is_long_trade=0 THEN 1 ELSE 0 END)/NULLIF(COUNT(*),0)*100,0) AS scalping_rate,
                 COALESCE(AVG(is_long_trade),0) AS long_trade_rate,
                 COALESCE(MAX(pnl),0) AS best_trade_pnl, COALESCE(MIN(pnl),0) AS worst_trade_pnl,
-                COALESCE(SUM(CASE WHEN value_usd>0 THEN value_usd ELSE 0 END),1) AS total_invested_usd
-         FROM swap_events WHERE wallet_address=? AND is_long_trade IS NOT NULL AND timestamp>=DATE_SUB(NOW(),INTERVAL ? DAY)`,
+                COALESCE(SUM(CASE WHEN swap_type='buy' AND value_usd>0 THEN value_usd
+                               WHEN swap_type IS NULL AND value_usd>0 THEN value_usd
+                               ELSE 0 END),1) AS total_invested_usd
+         FROM swap_events se WHERE se.wallet_address=? AND is_long_trade IS NOT NULL AND timestamp>=DATE_SUB(NOW(),INTERVAL ? DAY)`,
         [wallet, period.days]
       );
       const b = basicRows[0];
@@ -426,10 +467,12 @@ export async function getKolDetails(address: string): Promise<KolDetails | null>
     token_in_address: string; token_out_address: string;
     value_usd: number; pnl: number; is_win: number;
     holding_time_s: number|null; is_long_trade: number|null;
+    pnl_base: number|null; pnl_base_symbol: string|null; swap_type: string|null;
   }>(
     `SELECT tx_hash,timestamp,dex_name,token_in_symbol,token_out_symbol,
             token_in_address,token_out_address,value_usd,pnl,is_win,
-            holding_time_s,is_long_trade
+            holding_time_s,is_long_trade,
+            pnl_base,pnl_base_symbol,swap_type
      FROM swap_events WHERE wallet_address=? ORDER BY timestamp DESC LIMIT 50`,
     [address]
   );
@@ -477,6 +520,10 @@ export async function getKolDetails(address: string): Promise<KolDetails | null>
       holding_time_s: s.holding_time_s!==null ? Number(s.holding_time_s) : null,
       holding_time_formatted: formatHoldingTime(s.holding_time_s!==null ? Number(s.holding_time_s) : null),
       is_long_trade: s.is_long_trade,
+      // PnL na moeda base (ex: WETH) — disponível apenas em vendas (swap_type='sell')
+      pnl_base: s.pnl_base !== null ? Number(s.pnl_base) : null,
+      pnl_base_symbol: s.pnl_base_symbol ?? null,
+      swap_type: s.swap_type ?? null,
     })),
   };
 }
