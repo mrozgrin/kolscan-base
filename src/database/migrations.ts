@@ -368,6 +368,8 @@ const migrations: Array<{
       const kmC = new Set(kmCols.map((r) => r.COLUMN_NAME));
 
       const kmNewCols: Record<string, string> = {
+        long_trade_rate_pct:         'DECIMAL(5,2) DEFAULT NULL',
+        profit_pct:                  'DECIMAL(10,4) DEFAULT NULL',
         followability_hold_score:    'DECIMAL(5,2) DEFAULT NULL',
         followability_volume_score:  'DECIMAL(5,2) DEFAULT NULL',
         followability_liq_score:     'DECIMAL(5,2) DEFAULT NULL',
