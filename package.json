@@ -8,7 +8,7 @@
     "dev": "nodemon --exec ts-node src/index.ts",
     "dev:api-only": "INDEXER_ENABLED=false nodemon --exec ts-node src/index.ts",
     "typecheck": "tsc --noEmit",
-    "db:migrate": "ts-node -e \"require('./src/database/migrations').runMigrations().then(() => process.exit(0)).catch(e => { console.error(e); process.exit(1); })\"",
+    "db:migrate": "ts-node -e \"require('./src/database/migrations').runMigrations().then(() => process.exit(0)).catch((e: unknown) => { console.error(e); process.exit(1); })\"",
     "test": "echo \"No tests configured yet\" && exit 0"
   },
   "repository": {
