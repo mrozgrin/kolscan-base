@@ -477,6 +477,129 @@ const migrations: Array<{
       `);
     },
   },
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // Migration 7: garantir colunas críticas em kol_metrics, wallets e tokens
+  // Corrige casos onde a migration 6 foi registrada mas falhou parcialmente,
+  // deixando colunas faltando no banco.
+  // ───────────────────────────────────────────────────────────────────────────
+  {
+    version: 7,
+    name: 'ensure_critical_columns',
+    async up() {
+      // ── kol_metrics: colunas obrigatórias para o metrics-service ──────────
+      const kmCols = await query<{ COLUMN_NAME: string }>(
+        `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'kol_metrics'`
+      );
+      const kmC = new Set(kmCols.map((r) => r.COLUMN_NAME));
+
+      const criticalKmCols: Record<string, string> = {
+        long_trade_rate_pct:         'DECIMAL(5,2) DEFAULT NULL',
+        profit_pct:                  'DECIMAL(10,4) DEFAULT NULL',
+        scalping_rate:               'DECIMAL(5,2) DEFAULT NULL',
+        holding_time_avg_s:          'INT DEFAULT NULL',
+        follow_score:                'DECIMAL(5,2) DEFAULT NULL',
+        followability_hold_score:    'DECIMAL(5,2) DEFAULT NULL',
+        followability_volume_score:  'DECIMAL(5,2) DEFAULT NULL',
+        followability_liq_score:     'DECIMAL(5,2) DEFAULT NULL',
+        followability_final:         'DECIMAL(5,2) DEFAULT NULL',
+        consistency_wr_stability:    'DECIMAL(5,2) DEFAULT NULL',
+        consistency_pnl_stability:   'DECIMAL(5,2) DEFAULT NULL',
+        consistency_diversification: 'DECIMAL(5,2) DEFAULT NULL',
+        consistency_final:           'DECIMAL(5,2) DEFAULT NULL',
+        pnl_relative_score:          'DECIMAL(5,2) DEFAULT NULL',
+        pnl_profit_factor:           'DECIMAL(10,2) DEFAULT NULL',
+        pnl_pf_score:                'DECIMAL(5,2) DEFAULT NULL',
+        pnl_final:                   'DECIMAL(5,2) DEFAULT NULL',
+        win_rate_score:              'DECIMAL(5,2) DEFAULT NULL',
+        trades_per_day:              'DECIMAL(8,2) DEFAULT NULL',
+        avg_position_size_usd:       'DECIMAL(36,6) DEFAULT NULL',
+        gross_profit_usd:            'DECIMAL(36,6) DEFAULT NULL',
+        gross_loss_usd:              'DECIMAL(36,6) DEFAULT NULL',
+        monthly_wr_cv:               'DECIMAL(5,2) DEFAULT NULL',
+        profitable_months_ratio:     'DECIMAL(5,2) DEFAULT NULL',
+        diversification_ratio:       'DECIMAL(5,4) DEFAULT NULL',
+        p90_benchmark_usd:           'DECIMAL(36,6) DEFAULT NULL',
+        has_sufficient_data:         'TINYINT(1) NOT NULL DEFAULT 1',
+      };
+
+      for (const [col, def] of Object.entries(criticalKmCols)) {
+        if (!kmC.has(col)) {
+          await ddl(`ALTER TABLE kol_metrics ADD COLUMN ${col} ${def}`);
+          logger.debug(`Added column kol_metrics.${col}`);
+        }
+      }
+
+      // ── wallets: colunas de flags e desqualificação ───────────────────────
+      const wCols = await query<{ COLUMN_NAME: string }>(
+        `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wallets'`
+      );
+      const wC = new Set(wCols.map((r) => r.COLUMN_NAME));
+
+      const criticalWCols: Record<string, string> = {
+        flag_scalper:               'TINYINT(1) NOT NULL DEFAULT 0',
+        flag_bundler:               'TINYINT(1) NOT NULL DEFAULT 0',
+        flag_creator_funded:        'TINYINT(1) NOT NULL DEFAULT 0',
+        flag_sybil:                 'TINYINT(1) NOT NULL DEFAULT 0',
+        scalper_copiability_index:  'DECIMAL(5,4) DEFAULT NULL',
+        scalper_avg_hold_s:         'INT DEFAULT NULL',
+        scalper_trade_count:        'INT DEFAULT NULL',
+        bundler_same_block_count:   'INT DEFAULT NULL',
+        creator_funded_token:       'VARCHAR(42) DEFAULT NULL',
+        creator_funded_at:          'DATETIME DEFAULT NULL',
+        sybil_cluster_id:           'INT DEFAULT NULL',
+        is_disqualified:            'TINYINT(1) NOT NULL DEFAULT 0',
+        disqualification_reason:    'VARCHAR(30) DEFAULT NULL',
+        flags_updated_at:           'DATETIME DEFAULT NULL',
+      };
+
+      for (const [col, def] of Object.entries(criticalWCols)) {
+        if (!wC.has(col)) {
+          await ddl(`ALTER TABLE wallets ADD COLUMN ${col} ${def}`);
+          logger.debug(`Added column wallets.${col}`);
+        }
+      }
+
+      // ── tokens: colunas de deploy e market data ───────────────────────────
+      const tkCols = await query<{ COLUMN_NAME: string }>(
+        `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'tokens'`
+      );
+      const tkC = new Set(tkCols.map((r) => r.COLUMN_NAME));
+
+      const criticalTkCols: Record<string, string> = {
+        name:             'VARCHAR(100) DEFAULT NULL',
+        deployer_address: 'VARCHAR(42) DEFAULT NULL',
+        deploy_tx_hash:   'VARCHAR(66) DEFAULT NULL',
+        deploy_block:     'BIGINT DEFAULT NULL',
+        deploy_timestamp: 'DATETIME DEFAULT NULL',
+      };
+
+      for (const [col, def] of Object.entries(criticalTkCols)) {
+        if (!tkC.has(col)) {
+          await ddl(`ALTER TABLE tokens ADD COLUMN ${col} ${def}`);
+          logger.debug(`Added column tokens.${col}`);
+        }
+      }
+
+      // ── Índices críticos ──────────────────────────────────────────────────
+      const allIdxs = await query<{ TABLE_NAME: string; INDEX_NAME: string }>(
+        `SELECT TABLE_NAME, INDEX_NAME FROM information_schema.STATISTICS
+         WHERE TABLE_SCHEMA = DATABASE()
+           AND TABLE_NAME IN ('wallets', 'kol_metrics', 'swap_events')`
+      );
+      const idxSet = new Set(allIdxs.map((r) => `${r.TABLE_NAME}.${r.INDEX_NAME}`));
+
+      if (!idxSet.has('wallets.idx_wallets_disqualified'))
+        await ddl(`CREATE INDEX idx_wallets_disqualified ON wallets(is_disqualified)`);
+      if (!idxSet.has('kol_metrics.idx_kol_follow_score'))
+        await ddl(`CREATE INDEX idx_kol_follow_score ON kol_metrics(follow_score, period, period_start)`);
+      if (!idxSet.has('swap_events.idx_se_is_long_trade'))
+        await ddl(`CREATE INDEX idx_se_is_long_trade ON swap_events(is_long_trade)`);
+    },
+  },
 ];
 
 export async function runMigrations(): Promise<void> {
