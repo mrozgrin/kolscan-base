@@ -21,6 +21,14 @@ interface IndexerStatus {
 let isRunning = false;
 let lastIndexedBlock = 0;
 
+// Fila de blocos que falharam e precisam ser reprocessados
+const pendingRetryBlocks = new Set<number>();
+
+// Máximo de tentativas antes de confirmar que o bloco não existe na blockchain
+const MAX_BLOCK_RETRIES = 5;
+// Delay base para backoff exponencial (ms)
+const RETRY_BASE_DELAY_MS = 1000;
+
 /**
  * Obtém o último bloco indexado do banco de dados
  */
@@ -253,14 +261,103 @@ async function processSwapEvent(
 }
 
 /**
+ * Busca um bloco com retry e backoff exponencial.
+ * Só desiste após MAX_BLOCK_RETRIES tentativas — nunca ignora silenciosamente.
+ * Retorna null apenas se o bloco confirmadamente não existe na blockchain
+ * (número além do head da rede após todas as tentativas).
+ */
+async function fetchBlockWithRetry(
+  blockNumber: number
+): Promise<Awaited<ReturnType<typeof getBlockWithTransactions>>> {
+  for (let attempt = 1; attempt <= MAX_BLOCK_RETRIES; attempt++) {
+    try {
+      const block = await getBlockWithTransactions(blockNumber);
+      if (block) return block;
+
+      // Bloco retornou null — pode ser lag do RPC ou bloco ainda não propagado.
+      // Verificar se o número já existe na rede antes de desistir.
+      const networkHead = await getLatestBlockNumber();
+
+      if (blockNumber > networkHead) {
+        // Bloco genuinamente não existe ainda — aguardar mineração
+        logger.debug(
+          `Block ${blockNumber} not yet mined (head: ${networkHead}), waiting...`
+        );
+        await sleep(config.blockchain.pollingInterval);
+        // Não conta como tentativa falha — é só espera
+        attempt--;
+        continue;
+      }
+
+      // Bloco deveria existir mas o RPC retornou null — pode ser lag de propagação
+      const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1); // 1s, 2s, 4s, 8s, 16s
+      logger.warn(
+        `Block ${blockNumber} not found by RPC (attempt ${attempt}/${MAX_BLOCK_RETRIES}), retrying in ${delay}ms...`
+      );
+      await sleep(delay);
+    } catch (err) {
+      const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt - 1);
+      logger.warn(
+        `Error fetching block ${blockNumber} (attempt ${attempt}/${MAX_BLOCK_RETRIES}): ${
+          (err as Error).message
+        }, retrying in ${delay}ms...`
+      );
+      await sleep(delay);
+    }
+  }
+
+  // Após todas as tentativas, verificar uma última vez se o bloco existe na rede.
+  // Se não existir (ex: bloco órfão ou número inválido), registrar e pular.
+  const networkHead = await getLatestBlockNumber();
+  if (blockNumber > networkHead) {
+    logger.warn(
+      `Block ${blockNumber} does not exist on-chain (head: ${networkHead}). Skipping.`
+    );
+    return null;
+  }
+
+  // Bloco existe na rede mas o RPC não conseguiu retorná-lo após todas as tentativas.
+  // Adicionar à fila de pendentes para reprocessamento posterior.
+  logger.error(
+    `Block ${blockNumber} could not be fetched after ${MAX_BLOCK_RETRIES} attempts. ` +
+    `Added to pending retry queue.`
+  );
+  pendingRetryBlocks.add(blockNumber);
+  return null;
+}
+
+/**
+ * Reprocessa blocos que falharam anteriormente.
+ * Chamado periodicamente durante a indexação em tempo real.
+ */
+async function retryPendingBlocks(): Promise<void> {
+  if (pendingRetryBlocks.size === 0) return;
+
+  logger.info(`Retrying ${pendingRetryBlocks.size} pending blocks...`);
+  const toRetry = [...pendingRetryBlocks];
+
+  for (const blockNumber of toRetry) {
+    if (!isRunning) break;
+    const block = await fetchBlockWithRetry(blockNumber);
+    if (block) {
+      // Sucesso — processar e remover da fila
+      await processBlock(blockNumber);
+      pendingRetryBlocks.delete(blockNumber);
+      logger.info(`Pending block ${blockNumber} successfully reprocessed.`);
+    }
+  }
+}
+
+/**
  * Processa um bloco completo
  */
 async function processBlock(blockNumber: number): Promise<void> {
   const provider = getProvider();
-  const block = await getBlockWithTransactions(blockNumber);
+  const block = await fetchBlockWithRetry(blockNumber);
 
   if (!block) {
-    logger.warn(`Block ${blockNumber} not found`);
+    // fetchBlockWithRetry já tratou o caso: ou adicionou à fila de pendentes
+    // ou confirmou que o bloco não existe na blockchain.
     return;
   }
 
@@ -327,6 +424,10 @@ async function syncHistoricalBlocks(
   }
 }
 
+// Contador de ciclos para disparar retryPendingBlocks a cada N ciclos
+let realtimeCycleCount = 0;
+const RETRY_PENDING_EVERY_N_CYCLES = 10; // a cada ~10 × pollingInterval
+
 /**
  * Inicia o indexador em modo de tempo real (polling)
  */
@@ -349,6 +450,12 @@ async function startRealtimeIndexing(): Promise<void> {
           lastIndexedBlock = blockNum;
           await updateIndexerState(blockNum, false);
         }
+      }
+
+      // Periodicamente tentar reprocessar blocos que falharam
+      realtimeCycleCount++;
+      if (realtimeCycleCount % RETRY_PENDING_EVERY_N_CYCLES === 0) {
+        await retryPendingBlocks();
       }
     } catch (error) {
       logger.error('Error in real-time indexing', { error: (error as Error).message });
