@@ -193,20 +193,45 @@ const migrations: Array<{
   {
     version: 4,
     name: 'add_holding_time_and_follow_score',
-    // Novas métricas para avaliar se uma carteira vale a pena seguir:
-    //   holding_time_avg_s  — tempo médio de posição em segundos
-    //   scalping_rate       — % de trades abaixo do limiar de scalping
-    //   follow_score        — nota 0-100 composta por win rate + holding time
+    // Novas métricas para avaliar se uma carteira vale a pena seguir.
+    // ALTER TABLE ADD COLUMN IF NOT EXISTS só existe no MySQL >= 8.0.3.
+    // Para compatibilidade com versões anteriores, verificamos a existência
+    // da coluna via information_schema.COLUMNS antes de cada ALTER TABLE.
     up: async () => {
-      // swap_events: registrar o tempo de holding de cada trade
-      await ddl('ALTER TABLE swap_events ADD COLUMN IF NOT EXISTS holding_time_s INT DEFAULT NULL COMMENT \'Segundos entre compra e venda do token\'');
+      // Helper: adiciona coluna apenas se ela ainda não existir
+      async function addColumnIfMissing(
+        table: string,
+        column: string,
+        definition: string
+      ): Promise<void> {
+        const exists = await query<{ cnt: number }>(
+          `SELECT COUNT(*) AS cnt
+           FROM information_schema.COLUMNS
+           WHERE table_schema = DATABASE()
+             AND table_name   = ?
+             AND column_name  = ?`,
+          [table, column]
+        );
+        if (!exists[0] || exists[0].cnt === 0) {
+          await ddl(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+        }
+      }
 
-      // kol_metrics: métricas agregadas de holding e follow score
-      await ddl('ALTER TABLE kol_metrics ADD COLUMN IF NOT EXISTS holding_time_avg_s   INT           DEFAULT NULL COMMENT \'Média de segundos nas posições\'');
-      await ddl('ALTER TABLE kol_metrics ADD COLUMN IF NOT EXISTS holding_time_median_s INT          DEFAULT NULL COMMENT \'Mediana de segundos nas posições\'');
-      await ddl('ALTER TABLE kol_metrics ADD COLUMN IF NOT EXISTS scalping_trades       INT           NOT NULL DEFAULT 0 COMMENT \'Trades abaixo do limiar de scalping\'');
-      await ddl('ALTER TABLE kol_metrics ADD COLUMN IF NOT EXISTS scalping_rate         DECIMAL(5,2)  NOT NULL DEFAULT 0 COMMENT \'% de trades considerados scalping\'');
-      await ddl('ALTER TABLE kol_metrics ADD COLUMN IF NOT EXISTS follow_score          DECIMAL(5,2)  NOT NULL DEFAULT 0 COMMENT \'Nota 0-100 para seguir o trader\'');
+      // swap_events
+      await addColumnIfMissing('swap_events', 'holding_time_s',
+        "INT DEFAULT NULL COMMENT 'Segundos entre compra e venda do token'");
+
+      // kol_metrics
+      await addColumnIfMissing('kol_metrics', 'holding_time_avg_s',
+        "INT DEFAULT NULL COMMENT 'Media de segundos nas posicoes'");
+      await addColumnIfMissing('kol_metrics', 'holding_time_median_s',
+        "INT DEFAULT NULL COMMENT 'Mediana de segundos nas posicoes'");
+      await addColumnIfMissing('kol_metrics', 'scalping_trades',
+        "INT NOT NULL DEFAULT 0 COMMENT 'Trades abaixo do limiar de scalping'");
+      await addColumnIfMissing('kol_metrics', 'scalping_rate',
+        "DECIMAL(5,2) NOT NULL DEFAULT 0 COMMENT '% de trades considerados scalping'");
+      await addColumnIfMissing('kol_metrics', 'follow_score',
+        "DECIMAL(5,2) NOT NULL DEFAULT 0 COMMENT 'Nota 0-100 para seguir o trader'");
     },
   },
 
