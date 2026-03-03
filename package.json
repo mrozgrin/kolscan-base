@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "db:migrate": "ts-node -e \"require('./src/database/migrations').runMigrations().then(() => process.exit(0)).catch((e: unknown) => { console.error(e); process.exit(1); })\"",
     "recalculate-holding": "ts-node src/scripts/recalculate-holding.ts",
+    "recalculate-pnl": "ts-node src/scripts/recalculate-pnl.ts",
     "test": "echo \"No tests configured yet\" && exit 0"
   },
   "repository": {
