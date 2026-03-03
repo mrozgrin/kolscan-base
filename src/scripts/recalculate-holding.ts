@@ -18,7 +18,7 @@
  */
 
 import 'dotenv/config';
-import { query, execute, closePool } from '../database/connection';
+import { query, execute, ddl, closePool } from '../database/connection';
 import { updateAllKolMetrics } from '../services/metrics-service';
 import { config } from '../config';
 import { logger } from '../utils/logger';
@@ -120,20 +120,19 @@ async function recalculateHoldingTimes(): Promise<void> {
   // ─────────────────────────────────────────────────────────────────────────
   logger.info(`Recalculating is_long_trade with threshold = ${SCALPING_THRESHOLD}s for all swaps...`);
 
-  // Atualizar em lotes usando UPDATE direto no MySQL (muito mais rápido que row-by-row)
-  const [longResult] = await query<{ affected: number }>(
-    `UPDATE swap_events
-     SET is_long_trade = CASE
-       WHEN holding_time_s >= ${SCALPING_THRESHOLD} THEN 1
-       ELSE 0
-     END
-     WHERE holding_time_s IS NOT NULL`
-  );
+  // UPDATE em massa via ddl() (protocolo simples) — não usa prepared statements,
+  // portanto suporta CASE expressions e não retorna resultado iterável.
+  await ddl(`
+    UPDATE swap_events
+    SET is_long_trade = CASE
+      WHEN holding_time_s >= ${SCALPING_THRESHOLD} THEN 1
+      ELSE 0
+    END
+    WHERE holding_time_s IS NOT NULL
+  `);
 
   // Garantir NULL onde holding_time_s é NULL
-  await query(
-    `UPDATE swap_events SET is_long_trade = NULL WHERE holding_time_s IS NULL`
-  );
+  await ddl(`UPDATE swap_events SET is_long_trade = NULL WHERE holding_time_s IS NULL`);
 
   logger.info('is_long_trade recalculation complete');
 
