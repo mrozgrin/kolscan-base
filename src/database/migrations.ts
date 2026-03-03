@@ -189,6 +189,26 @@ const migrations: Array<{
       }
     },
   },
+
+  {
+    version: 3,
+    name: 'widen_decimal_columns',
+    // DECIMAL(20,6) suporta no máximo ~99 trilhões com 6 casas decimais.
+    // Traders com grande volume acumulado ultrapassam esse limite.
+    // Aumentamos para DECIMAL(36,6) em todas as colunas de valor monetário.
+    up: async () => {
+      // kol_metrics
+      await ddl('ALTER TABLE kol_metrics MODIFY COLUMN profit_usd      DECIMAL(36,6) NOT NULL DEFAULT 0');
+      await ddl('ALTER TABLE kol_metrics MODIFY COLUMN best_trade_pnl  DECIMAL(36,6) DEFAULT NULL');
+      await ddl('ALTER TABLE kol_metrics MODIFY COLUMN worst_trade_pnl DECIMAL(36,6) DEFAULT NULL');
+      // swap_events
+      await ddl('ALTER TABLE swap_events MODIFY COLUMN value_usd DECIMAL(36,6) DEFAULT NULL');
+      await ddl('ALTER TABLE swap_events MODIFY COLUMN pnl       DECIMAL(36,6) DEFAULT NULL');
+      // transactions
+      await ddl('ALTER TABLE transactions MODIFY COLUMN value_usd DECIMAL(36,6) DEFAULT NULL');
+      await ddl('ALTER TABLE transactions MODIFY COLUMN pnl       DECIMAL(36,6) DEFAULT NULL');
+    },
+  },
 ];
 
 export async function runMigrations(): Promise<void> {
