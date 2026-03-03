@@ -225,42 +225,4 @@ export async function searchWalletHandler(
   }
 }
 
-/**
- * GET /api/tokens
- * Retorna os tokens mais negociados nas últimas 24h
- */
-export async function getTopTokensHandler(
-  req: Request,
-  res: Response,
-  next: NextFunction
-): Promise<void> {
-  try {
-    const limit = Math.min(parseInt(req.query.limit as string) || 20, 100);
 
-    const tokens = await query<{
-      token_address: string;
-      token_symbol: string;
-      swap_count: number;
-      unique_traders: number;
-      total_volume_usd: number;
-    }>(
-      `SELECT
-         token_out_address                    AS token_address,
-         token_out_symbol                     AS token_symbol,
-         COUNT(*)                             AS swap_count,
-         COUNT(DISTINCT wallet_address)       AS unique_traders,
-         COALESCE(SUM(ABS(value_usd)), 0)     AS total_volume_usd
-       FROM swap_events
-       WHERE timestamp >= NOW() - INTERVAL 24 HOUR
-         AND token_out_symbol != 'UNKNOWN'
-       GROUP BY token_out_address, token_out_symbol
-       ORDER BY COUNT(*) DESC
-       LIMIT ${limit}`,
-      []
-    );
-
-    res.json({ success: true, data: tokens } as ApiResponse<typeof tokens>);
-  } catch (error) {
-    next(error);
-  }
-}

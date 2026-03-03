@@ -3,7 +3,7 @@ import { runMigrations } from './database/migrations';
 import { testProviderConnection, destroyProviders } from './indexer/provider';
 import { startIndexer, stopIndexer } from './indexer/block-indexer';
 import { startServer } from './api/server';
-import { startMetricsUpdater, startPricesUpdater, stopAllJobs } from './jobs/metrics-updater';
+import { startMetricsUpdater, startPricesUpdater, startTokenMarketDataUpdater, stopAllJobs } from './jobs/metrics-updater';
 import { config } from './config';
 import { logger } from './utils/logger';
 
@@ -41,6 +41,7 @@ async function main(): Promise<void> {
   // startMetricsUpdater é async: aguarda o recálculo inicial antes de continuar
   await startMetricsUpdater();
   startPricesUpdater();
+  startTokenMarketDataUpdater();
 
   // 6. Iniciar indexador (se habilitado e provider disponível)
   if (config.indexer.enabled && providerOk) {

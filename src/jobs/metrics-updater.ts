@@ -1,11 +1,13 @@
 import { updateAllKolMetrics } from '../services/metrics-service';
 import { runDailyFlagsUpdate } from '../services/flags-service';
 import { updateAllTokenPrices } from '../services/price-service';
+import { updateTokenMarketData } from '../services/token-service';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 
 let metricsInterval: NodeJS.Timeout | null = null;
 let pricesInterval: NodeJS.Timeout | null = null;
+let marketDataInterval: NodeJS.Timeout | null = null;
 let flagsTimeout: NodeJS.Timeout | null = null;
 let scoresTimeout: NodeJS.Timeout | null = null;
 
@@ -121,12 +123,36 @@ export function startPricesUpdater(): void {
 }
 
 /**
+ * Inicia o job de atualização de market data dos tokens ativos (a cada 5 min)
+ * Atualiza preço, price_change_24h, liquidity, volume para os 100 tokens mais ativos
+ */
+export function startTokenMarketDataUpdater(): void {
+  logger.info('Starting token market data updater job...');
+
+  // Rodar imediatamente na inicialização
+  updateTokenMarketData().catch((err) =>
+    logger.error('Initial token market data update failed', { error: (err as Error).message })
+  );
+
+  marketDataInterval = setInterval(async () => {
+    try {
+      await updateTokenMarketData();
+    } catch (error) {
+      logger.error('Token market data update job failed', { error: (error as Error).message });
+    }
+  }, 5 * 60 * 1000);
+
+  logger.info('Token market data updater scheduled every 5 minutes');
+}
+
+/**
  * Para todos os jobs em background
  */
 export function stopAllJobs(): void {
-  if (metricsInterval) { clearInterval(metricsInterval); metricsInterval = null; }
-  if (pricesInterval)  { clearInterval(pricesInterval);  pricesInterval  = null; }
-  if (flagsTimeout)    { clearTimeout(flagsTimeout);     flagsTimeout    = null; }
-  if (scoresTimeout)   { clearTimeout(scoresTimeout);    scoresTimeout   = null; }
+  if (metricsInterval)    { clearInterval(metricsInterval);    metricsInterval    = null; }
+  if (pricesInterval)     { clearInterval(pricesInterval);     pricesInterval     = null; }
+  if (marketDataInterval) { clearInterval(marketDataInterval); marketDataInterval = null; }
+  if (flagsTimeout)       { clearTimeout(flagsTimeout);        flagsTimeout       = null; }
+  if (scoresTimeout)      { clearTimeout(scoresTimeout);       scoresTimeout      = null; }
   logger.info('All background jobs stopped');
 }

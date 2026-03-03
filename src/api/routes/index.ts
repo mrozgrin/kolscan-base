@@ -6,8 +6,14 @@ import {
   getKolSwapsHandler,
   getPlatformStatsHandler,
   searchWalletHandler,
-  getTopTokensHandler,
 } from '../controllers/kol-controller';
+import {
+  getTopTokensHandler,
+  getTokenDetailsHandler,
+  getTokenTradersHandler,
+  getTokenPriceHistoryHandler,
+  getKolBuyingNowHandler,
+} from '../controllers/token-controller';
 import {
   getIndexerStatusHandler,
   healthCheckHandler,
@@ -16,30 +22,33 @@ import { validateAddress, validatePeriod } from '../middleware/error-handler';
 
 const router = Router();
 
-// Health check
+// ── Health check ──────────────────────────────────────────────────────────────
 router.get('/health', healthCheckHandler);
 
-// Leaderboard
+// ── Leaderboard ───────────────────────────────────────────────────────────────
 router.get('/leaderboard', validatePeriod, getLeaderboardHandler);
-
-// Wallets desqualificadas
 router.get('/leaderboard/disqualified', getDisqualifiedHandler);
 
-// KOL endpoints
+// ── KOL endpoints ─────────────────────────────────────────────────────────────
 router.get('/kol/:address', validateAddress, getKolDetailsHandler);
 router.get('/kol/:address/transactions', validateAddress, getKolTransactionsHandler);
 router.get('/kol/:address/swaps', validateAddress, getKolSwapsHandler);
 
-// Estatísticas gerais
+// ── Estatísticas gerais ───────────────────────────────────────────────────────
 router.get('/stats', getPlatformStatsHandler);
 
-// Busca
+// ── Busca ─────────────────────────────────────────────────────────────────────
 router.get('/search', searchWalletHandler);
 
-// Tokens
+// ── Tokens ────────────────────────────────────────────────────────────────────
+// IMPORTANTE: rotas estáticas ANTES das rotas com parâmetro (:address)
+router.get('/tokens/kol-buying', getKolBuyingNowHandler);
 router.get('/tokens', getTopTokensHandler);
+router.get('/tokens/:address', getTokenDetailsHandler);
+router.get('/tokens/:address/traders', getTokenTradersHandler);
+router.get('/tokens/:address/history', getTokenPriceHistoryHandler);
 
-// Indexer status
+// ── Indexer status ────────────────────────────────────────────────────────────
 router.get('/indexer/status', getIndexerStatusHandler);
 
 export default router;
