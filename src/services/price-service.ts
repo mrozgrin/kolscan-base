@@ -1,6 +1,6 @@
 import axios from 'axios';
 import { logger } from '../utils/logger';
-import { query } from '../database/connection';
+import { query, execute } from '../database/connection';
 import { retry } from '../utils/helpers';
 
 const DEXSCREENER_BASE_URL = 'https://api.dexscreener.com/latest/dex';
@@ -103,8 +103,8 @@ export async function getTokenPrice(tokenAddress: string): Promise<number | null
   // Verificar banco de dados
   try {
     const dbResult = await query<{ price_usd: number; price_updated_at: Date }>(
-      `SELECT price_usd, price_updated_at FROM tokens 
-       WHERE address = $1 AND price_updated_at > NOW() - INTERVAL '5 minutes'`,
+      `SELECT price_usd, price_updated_at FROM tokens
+       WHERE address = ? AND price_updated_at > NOW() - INTERVAL 5 MINUTE`,
       [normalizedAddress]
     );
 
@@ -134,10 +134,10 @@ export async function getTokenPrice(tokenAddress: string): Promise<number | null
 
     // Salvar no banco de dados
     try {
-      await query(
-        `INSERT INTO tokens (address, price_usd, price_updated_at) 
-         VALUES ($1, $2, NOW())
-         ON CONFLICT (address) DO UPDATE SET price_usd = $2, price_updated_at = NOW(), updated_at = NOW()`,
+      await execute(
+        `INSERT INTO tokens (address, price_usd, price_updated_at)
+         VALUES (?, ?, NOW())
+         ON DUPLICATE KEY UPDATE price_usd = VALUES(price_usd), price_updated_at = NOW()`,
         [normalizedAddress, price]
       );
     } catch (error) {
@@ -159,7 +159,7 @@ export async function getTokenInfo(
   // Verificar banco de dados
   try {
     const dbResult = await query<{ symbol: string; name: string; decimals: number }>(
-      'SELECT symbol, name, decimals FROM tokens WHERE address = $1',
+      'SELECT symbol, name, decimals FROM tokens WHERE address = ?',
       [normalizedAddress]
     );
 
@@ -194,10 +194,10 @@ export async function getTokenInfo(
 
         // Salvar no banco de dados
         try {
-          await query(
-            `INSERT INTO tokens (address, symbol, name, decimals) 
-             VALUES ($1, $2, $3, $4)
-             ON CONFLICT (address) DO UPDATE SET symbol = $2, name = $3, updated_at = NOW()`,
+          await execute(
+            `INSERT INTO tokens (address, symbol, name, decimals)
+             VALUES (?, ?, ?, ?)
+             ON DUPLICATE KEY UPDATE symbol = VALUES(symbol), name = VALUES(name)`,
             [normalizedAddress, info.symbol, info.name, info.decimals]
           );
         } catch (dbError) {
@@ -222,7 +222,7 @@ export async function updateAllTokenPrices(): Promise<void> {
 
   try {
     const tokens = await query<{ address: string }>(
-      'SELECT address FROM tokens WHERE price_updated_at < NOW() - INTERVAL \'5 minutes\' OR price_updated_at IS NULL LIMIT 100'
+      'SELECT address FROM tokens WHERE price_updated_at < NOW() - INTERVAL 5 MINUTE OR price_updated_at IS NULL LIMIT 100'
     );
 
     for (const token of tokens) {

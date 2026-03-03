@@ -16,7 +16,7 @@ Este projeto fornece uma API RESTful para analisar a atividade de trading na blo
 ## Stack Tecnológica
 
 - **Backend:** Node.js, Express, TypeScript
-- **Banco de Dados:** PostgreSQL
+- **Banco de Dados:** MySQL
 - **Blockchain:** Ethers.js para interação com RPC da Base
 - **Filas e Cache:** Redis (via Bull e IORedis)
 - **Logging:** Winston
@@ -24,7 +24,7 @@ Este projeto fornece uma API RESTful para analisar a atividade de trading na blo
 ## Pré-requisitos
 
 - Node.js >= 18.0.0
-- PostgreSQL >= 13
+- MySQL >= 8.0
 - Redis >= 6
 - Um endpoint RPC para a blockchain Base (ex: Alchemy, QuickNode)
 

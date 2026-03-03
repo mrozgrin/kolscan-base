@@ -2,7 +2,7 @@ import { ethers } from 'ethers';
 import type { Block, TransactionResponse, Log } from 'ethers';
 import { getProvider, getBlockWithTransactions, getLatestBlockNumber } from './provider';
 import { extractSwapEvents, SWAP_TOPICS } from './dex-decoder';
-import { query } from '../database/connection';
+import { query, execute } from '../database/connection';
 // getTokenPrice and getTokenInfo are used indirectly via processSwapEvent
 import { getTokenPrice, getTokenInfo } from '../services/price-service';
 import { config } from '../config';
@@ -44,11 +44,11 @@ async function updateIndexerState(
   isSyncing: boolean,
   syncProgress?: number
 ): Promise<void> {
-  await query(
-    `UPDATE indexer_state 
-     SET last_indexed_block = $1, is_syncing = $2, sync_progress = $3, last_updated = NOW()
+  await execute(
+    `UPDATE indexer_state
+     SET last_indexed_block = ?, is_syncing = ?, sync_progress = ?, last_updated = NOW()
      WHERE id = 1`,
-    [lastBlock, isSyncing, syncProgress || null]
+    [lastBlock, isSyncing ? 1 : 0, syncProgress ?? null]
   );
 }
 
@@ -65,12 +65,14 @@ async function processTransaction(
   const toAddress = tx.to?.toLowerCase() || '';
 
   // Garantir que a carteira existe no banco de dados
-  await query(
+  await execute(
     `INSERT INTO wallets (address, first_seen, last_seen, total_transactions)
-     VALUES ($1, $2, $2, 1)
-     ON CONFLICT (address) DO UPDATE 
-     SET last_seen = $2, total_transactions = wallets.total_transactions + 1, updated_at = NOW()`,
-    [fromAddress, timestamp]
+     VALUES (?, ?, ?, 1)
+     ON DUPLICATE KEY UPDATE
+       last_seen = VALUES(last_seen),
+       total_transactions = total_transactions + 1,
+       updated_at = NOW()`,
+    [fromAddress, timestamp, timestamp]
   );
 
   // Verificar se a transação tem valor em ETH
@@ -107,10 +109,10 @@ async function processTransaction(
   // Salvar transação no banco de dados
   const txType = swapEvents.length > 0 ? 'swap' : valueEth > 0 ? 'transfer' : 'contract_call';
 
-  await query(
-    `INSERT INTO transactions (hash, wallet_address, block_number, timestamp, from_address, to_address, value_eth, tx_type)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-     ON CONFLICT (hash) DO NOTHING`,
+  await execute(
+    `INSERT IGNORE INTO transactions
+       (hash, wallet_address, block_number, timestamp, from_address, to_address, value_eth, tx_type)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       tx.hash,
       fromAddress,
@@ -166,15 +168,14 @@ async function processSwapEvent(
   }
 
   // Salvar evento de swap
-  await query(
-    `INSERT INTO swap_events (
+  await execute(
+    `INSERT IGNORE INTO swap_events (
        tx_hash, block_number, timestamp, wallet_address, dex_address, dex_name,
        token_in_address, token_in_symbol, token_in_amount,
        token_out_address, token_out_symbol, token_out_amount,
        value_usd, pnl, is_win
      )
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-     ON CONFLICT (tx_hash, dex_address) DO NOTHING`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       swapEvent.tx_hash,
       swapEvent.block_number,
@@ -190,7 +191,7 @@ async function processSwapEvent(
       swapEvent.token_out_amount,
       valueInUsd,
       pnl,
-      isWin,
+      isWin === null ? null : (isWin ? 1 : 0),
     ]
   );
 }

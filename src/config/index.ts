@@ -10,9 +10,9 @@ export const config = {
   // Database
   database: {
     host: process.env.DB_HOST || 'localhost',
-    port: parseInt(process.env.DB_PORT || '5432', 10),
+    port: parseInt(process.env.DB_PORT || '3306', 10),
     name: process.env.DB_NAME || 'kolscan_base',
-    user: process.env.DB_USER || 'postgres',
+    user: process.env.DB_USER || 'root',
     password: process.env.DB_PASSWORD || '',
     ssl: process.env.DB_SSL === 'true',
     poolMax: parseInt(process.env.DB_POOL_MAX || '20', 10),

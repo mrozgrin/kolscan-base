@@ -51,7 +51,7 @@ export async function healthCheckHandler(
 ): Promise<void> {
   try {
     // Verificar conexão com banco de dados
-    const dbCheck = await query<{ now: Date }>('SELECT NOW()');
+    const dbCheck = await query<{ now: string }>('SELECT NOW() AS now');
     const dbOk = dbCheck.length > 0;
 
     const response: ApiResponse<{

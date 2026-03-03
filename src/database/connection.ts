@@ -1,87 +1,105 @@
-import { Pool, PoolClient } from 'pg';
+import mysql, { type OkPacket, type RowDataPacket, type ResultSetHeader, type FieldPacket } from 'mysql2/promise';
 import { config } from '../config';
 import { logger } from '../utils/logger';
 
-let pool: Pool | null = null;
+let pool: mysql.Pool | null = null;
 
-export function getPool(): Pool {
+/**
+ * Retorna o pool de conexões MySQL (singleton)
+ */
+export function getPool(): mysql.Pool {
   if (!pool) {
-    pool = new Pool({
+    pool = mysql.createPool({
       host: config.database.host,
       port: config.database.port,
       database: config.database.name,
       user: config.database.user,
       password: config.database.password,
-      ssl: config.database.ssl ? { rejectUnauthorized: false } : false,
-      max: config.database.poolMax,
-      min: config.database.poolMin,
-      idleTimeoutMillis: config.database.poolIdleTimeout,
+      ssl: config.database.ssl ? { rejectUnauthorized: false } : undefined,
+      waitForConnections: true,
+      connectionLimit: config.database.poolMax,
+      queueLimit: 0,
+      timezone: '+00:00',
+      dateStrings: false,
+      decimalNumbers: true,
     });
 
-    pool.on('error', (err) => {
-      logger.error('Unexpected error on idle client', { error: err.message });
-    });
-
-    pool.on('connect', () => {
-      logger.debug('New database connection established');
+    logger.info('MySQL connection pool created', {
+      host: config.database.host,
+      port: config.database.port,
+      database: config.database.name,
     });
   }
 
   return pool;
 }
 
-export async function query<T = unknown>(
-  text: string,
-  params?: unknown[]
+/**
+ * Executa uma query SELECT com parâmetros posicionais (?).
+ * Retorna um array tipado de resultados.
+ */
+export async function query<T = Record<string, unknown>>(
+  sql: string,
+  params: (string | number | boolean | Date | null | undefined)[] = []
 ): Promise<T[]> {
-  const client = getPool();
   const start = Date.now();
-
   try {
-    const result = await client.query(text, params);
+    const [rows] = await getPool().execute<RowDataPacket[]>(sql, params as unknown as RowDataPacket[]);
     const duration = Date.now() - start;
-
     logger.debug('Database query executed', {
-      query: text.substring(0, 100),
+      query: sql.substring(0, 100),
       duration,
-      rows: result.rowCount,
+      rows: (rows as unknown[]).length,
     });
-
-    return result.rows as T[];
+    return rows as unknown as T[];
   } catch (error) {
     logger.error('Database query error', {
-      query: text.substring(0, 100),
+      query: sql.substring(0, 100),
       error: (error as Error).message,
     });
     throw error;
   }
 }
 
-export async function getClient(): Promise<PoolClient> {
-  return getPool().connect();
+/**
+ * Executa uma query de escrita (INSERT/UPDATE/DELETE).
+ * Retorna o ResultSetHeader com insertId e affectedRows.
+ */
+export async function execute(
+  sql: string,
+  params: (string | number | boolean | Date | null | undefined)[] = []
+): Promise<ResultSetHeader> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const [result] = await getPool().execute<ResultSetHeader>(sql, params as any);
+  return result;
 }
 
+/**
+ * Executa múltiplas queries dentro de uma transação.
+ */
 export async function transaction<T>(
-  callback: (client: PoolClient) => Promise<T>
+  fn: (conn: mysql.PoolConnection) => Promise<T>
 ): Promise<T> {
-  const client = await getClient();
-
+  const conn = await getPool().getConnection();
+  await conn.beginTransaction();
   try {
-    await client.query('BEGIN');
-    const result = await callback(client);
-    await client.query('COMMIT');
+    const result = await fn(conn);
+    await conn.commit();
     return result;
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
+  } catch (err) {
+    await conn.rollback();
+    throw err;
   } finally {
-    client.release();
+    conn.release();
   }
 }
 
+/**
+ * Testa a conexão com o banco de dados
+ */
 export async function testConnection(): Promise<boolean> {
   try {
-    const result = await query<{ now: Date }>('SELECT NOW()');
+    const result = await query<{ now: string }>('SELECT NOW() AS now');
     logger.info('Database connection successful', { timestamp: result[0]?.now });
     return true;
   } catch (error) {
@@ -90,6 +108,9 @@ export async function testConnection(): Promise<boolean> {
   }
 }
 
+/**
+ * Fecha o pool de conexões
+ */
 export async function closePool(): Promise<void> {
   if (pool) {
     await pool.end();
