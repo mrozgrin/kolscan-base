@@ -301,6 +301,180 @@ const migrations: Array<{
       await ddl('ALTER TABLE transactions MODIFY COLUMN pnl       DECIMAL(36,6) DEFAULT NULL');
     },
   },
+  {
+    version: 6,
+    name: 'add_disqualification_flags_and_score_components',
+    up: async () => {
+      // ── wallets: flags de desqualificação ──────────────────────────────────
+      const walletCols = await query<{ COLUMN_NAME: string }>(
+        `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wallets'`
+      );
+      const wCols = new Set(walletCols.map((r) => r.COLUMN_NAME));
+
+      if (!wCols.has('flag_scalper'))
+        await ddl(`ALTER TABLE wallets ADD COLUMN flag_scalper              TINYINT(1)    NOT NULL DEFAULT 0`);
+      if (!wCols.has('flag_bundler'))
+        await ddl(`ALTER TABLE wallets ADD COLUMN flag_bundler              TINYINT(1)    NOT NULL DEFAULT 0`);
+      if (!wCols.has('flag_creator_funded'))
+        await ddl(`ALTER TABLE wallets ADD COLUMN flag_creator_funded       TINYINT(1)    NOT NULL DEFAULT 0`);
+      if (!wCols.has('flag_sybil'))
+        await ddl(`ALTER TABLE wallets ADD COLUMN flag_sybil                TINYINT(1)    NOT NULL DEFAULT 0`);
+      if (!wCols.has('scalper_copiability_index'))
+        await ddl(`ALTER TABLE wallets ADD COLUMN scalper_copiability_index DECIMAL(5,4)  DEFAULT NULL`);
+      if (!wCols.has('scalper_copiable_trades'))
+        await ddl(`ALTER TABLE wallets ADD COLUMN scalper_copiable_trades   INT           DEFAULT NULL`);
+      if (!wCols.has('scalper_total_trades'))
+        await ddl(`ALTER TABLE wallets ADD COLUMN scalper_total_trades      INT           DEFAULT NULL`);
+      if (!wCols.has('scalper_avg_holding_time'))
+        await ddl(`ALTER TABLE wallets ADD COLUMN scalper_avg_holding_time  DECIMAL(10,2) DEFAULT NULL`);
+      if (!wCols.has('scalper_checked_at'))
+        await ddl(`ALTER TABLE wallets ADD COLUMN scalper_checked_at        DATETIME      DEFAULT NULL`);
+      if (!wCols.has('bundler_same_block_pct'))
+        await ddl(`ALTER TABLE wallets ADD COLUMN bundler_same_block_pct    DECIMAL(5,2)  DEFAULT NULL`);
+      if (!wCols.has('bundler_same_block_count'))
+        await ddl(`ALTER TABLE wallets ADD COLUMN bundler_same_block_count  INT           DEFAULT NULL`);
+      if (!wCols.has('creator_funded_token'))
+        await ddl(`ALTER TABLE wallets ADD COLUMN creator_funded_token      VARCHAR(42)   DEFAULT NULL`);
+      if (!wCols.has('creator_funded_at'))
+        await ddl(`ALTER TABLE wallets ADD COLUMN creator_funded_at         DATETIME      DEFAULT NULL`);
+      if (!wCols.has('sybil_cluster_id'))
+        await ddl(`ALTER TABLE wallets ADD COLUMN sybil_cluster_id          INT           DEFAULT NULL`);
+      if (!wCols.has('is_disqualified'))
+        await ddl(`ALTER TABLE wallets ADD COLUMN is_disqualified           TINYINT(1)    NOT NULL DEFAULT 0`);
+      if (!wCols.has('flags_updated_at'))
+        await ddl(`ALTER TABLE wallets ADD COLUMN flags_updated_at          DATETIME      DEFAULT NULL`);
+
+      // Índices em wallets
+      const wIdxs = await query<{ INDEX_NAME: string }>(
+        `SELECT DISTINCT INDEX_NAME FROM information_schema.STATISTICS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'wallets'`
+      );
+      const wIdx = new Set(wIdxs.map((r) => r.INDEX_NAME));
+      if (!wIdx.has('idx_wallets_disqualified'))
+        await ddl(`CREATE INDEX idx_wallets_disqualified ON wallets(is_disqualified)`);
+      if (!wIdx.has('idx_wallets_scalper'))
+        await ddl(`CREATE INDEX idx_wallets_scalper ON wallets(flag_scalper)`);
+      if (!wIdx.has('idx_wallets_bundler'))
+        await ddl(`CREATE INDEX idx_wallets_bundler ON wallets(flag_bundler)`);
+      if (!wIdx.has('idx_wallets_copiability'))
+        await ddl(`CREATE INDEX idx_wallets_copiability ON wallets(scalper_copiability_index)`);
+
+      // ── kol_metrics: componentes do score ────────────────────────────────
+      const kmCols = await query<{ COLUMN_NAME: string }>(
+        `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'kol_metrics'`
+      );
+      const kmC = new Set(kmCols.map((r) => r.COLUMN_NAME));
+
+      const kmNewCols: Record<string, string> = {
+        followability_hold_score:    'DECIMAL(5,2) DEFAULT NULL',
+        followability_volume_score:  'DECIMAL(5,2) DEFAULT NULL',
+        followability_liq_score:     'DECIMAL(5,2) DEFAULT NULL',
+        followability_final:         'DECIMAL(5,2) DEFAULT NULL',
+        consistency_wr_stability:    'DECIMAL(5,2) DEFAULT NULL',
+        consistency_pnl_stability:   'DECIMAL(5,2) DEFAULT NULL',
+        consistency_diversification: 'DECIMAL(5,2) DEFAULT NULL',
+        consistency_final:           'DECIMAL(5,2) DEFAULT NULL',
+        pnl_relative_score:          'DECIMAL(5,2) DEFAULT NULL',
+        pnl_profit_factor:           'DECIMAL(10,2) DEFAULT NULL',
+        pnl_pf_score:                'DECIMAL(5,2) DEFAULT NULL',
+        pnl_final:                   'DECIMAL(5,2) DEFAULT NULL',
+        win_rate_score:              'DECIMAL(5,2) DEFAULT NULL',
+        trades_per_day:              'DECIMAL(8,2) DEFAULT NULL',
+        avg_position_size_usd:       'DECIMAL(36,6) DEFAULT NULL',
+        gross_profit_usd:            'DECIMAL(36,6) DEFAULT NULL',
+        gross_loss_usd:              'DECIMAL(36,6) DEFAULT NULL',
+        monthly_wr_cv:               'DECIMAL(5,2) DEFAULT NULL',
+        profitable_months_ratio:     'DECIMAL(5,2) DEFAULT NULL',
+        diversification_ratio:       'DECIMAL(5,4) DEFAULT NULL',
+        p90_benchmark_usd:           'DECIMAL(36,6) DEFAULT NULL',
+        has_sufficient_data:         'TINYINT(1) NOT NULL DEFAULT 1',
+      };
+      for (const [col, def] of Object.entries(kmNewCols)) {
+        if (!kmC.has(col))
+          await ddl(`ALTER TABLE kol_metrics ADD COLUMN ${col} ${def}`);
+      }
+
+      // Índice composto no leaderboard
+      const kmIdxs = await query<{ INDEX_NAME: string }>(
+        `SELECT DISTINCT INDEX_NAME FROM information_schema.STATISTICS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'kol_metrics'`
+      );
+      const kmIdx = new Set(kmIdxs.map((r) => r.INDEX_NAME));
+      if (!kmIdx.has('idx_kol_follow_score'))
+        await ddl(`CREATE INDEX idx_kol_follow_score ON kol_metrics(follow_score, period, period_start)`);
+
+      // ── tokens: dados de deploy ───────────────────────────────────────────
+      const tkCols = await query<{ COLUMN_NAME: string }>(
+        `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'tokens'`
+      );
+      const tkC = new Set(tkCols.map((r) => r.COLUMN_NAME));
+      if (!tkC.has('deployer_address'))
+        await ddl(`ALTER TABLE tokens ADD COLUMN deployer_address VARCHAR(42) DEFAULT NULL`);
+      if (!tkC.has('deploy_tx_hash'))
+        await ddl(`ALTER TABLE tokens ADD COLUMN deploy_tx_hash   VARCHAR(66) DEFAULT NULL`);
+      if (!tkC.has('deploy_block'))
+        await ddl(`ALTER TABLE tokens ADD COLUMN deploy_block      BIGINT      DEFAULT NULL`);
+      if (!tkC.has('deploy_timestamp'))
+        await ddl(`ALTER TABLE tokens ADD COLUMN deploy_timestamp  DATETIME    DEFAULT NULL`);
+
+      const tkIdxs = await query<{ INDEX_NAME: string }>(
+        `SELECT DISTINCT INDEX_NAME FROM information_schema.STATISTICS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'tokens'`
+      );
+      const tkIdx = new Set(tkIdxs.map((r) => r.INDEX_NAME));
+      if (!tkIdx.has('idx_tokens_deployer'))
+        await ddl(`CREATE INDEX idx_tokens_deployer ON tokens(deployer_address)`);
+
+      // ── sybil_clusters ────────────────────────────────────────────────────
+      await ddl(`
+        CREATE TABLE IF NOT EXISTS sybil_clusters (
+          id               INT          NOT NULL AUTO_INCREMENT,
+          detected_at      DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          wallet_count     INT          NOT NULL,
+          common_funder    VARCHAR(42)  DEFAULT NULL,
+          sync_trade_count INT          DEFAULT NULL,
+          jaccard_avg      DECIMAL(5,4) DEFAULT NULL,
+          notes            TEXT         DEFAULT NULL,
+          PRIMARY KEY (id)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+      `);
+
+      // ── sybil_cluster_members ─────────────────────────────────────────────
+      await ddl(`
+        CREATE TABLE IF NOT EXISTS sybil_cluster_members (
+          cluster_id       INT         NOT NULL,
+          wallet_address   VARCHAR(42) NOT NULL,
+          added_at         DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          signals_matched  JSON        DEFAULT NULL,
+          PRIMARY KEY (cluster_id, wallet_address),
+          CONSTRAINT fk_scm_cluster FOREIGN KEY (cluster_id) REFERENCES sybil_clusters(id),
+          CONSTRAINT fk_scm_wallet  FOREIGN KEY (wallet_address) REFERENCES wallets(address)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+      `);
+
+      // ── kol_score_history ─────────────────────────────────────────────────
+      await ddl(`
+        CREATE TABLE IF NOT EXISTS kol_score_history (
+          id               BIGINT      NOT NULL AUTO_INCREMENT,
+          wallet_address   VARCHAR(42) NOT NULL,
+          calculated_at    DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          period           VARCHAR(20) NOT NULL,
+          follow_score     DECIMAL(5,2) NOT NULL,
+          followability    DECIMAL(5,2) NOT NULL DEFAULT 0,
+          consistency      DECIMAL(5,2) NOT NULL DEFAULT 0,
+          pnl_score        DECIMAL(5,2) NOT NULL DEFAULT 0,
+          win_rate_score   DECIMAL(5,2) NOT NULL DEFAULT 0,
+          total_trades     INT          NOT NULL DEFAULT 0,
+          PRIMARY KEY (id),
+          KEY idx_ksh_wallet_date (wallet_address, calculated_at),
+          CONSTRAINT fk_ksh_wallet FOREIGN KEY (wallet_address) REFERENCES wallets(address)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+      `);
+    },
+  },
 ];
 
 export async function runMigrations(): Promise<void> {

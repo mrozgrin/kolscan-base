@@ -145,7 +145,7 @@ export async function getKolSwapsHandler(
       `SELECT id, tx_hash, timestamp, dex_name,
          token_in_address, token_in_symbol, token_in_amount,
          token_out_address, token_out_symbol, token_out_amount,
-         value_usd, pnl, is_win
+         value_usd, pnl, is_win, holding_time_s, is_long_trade
        FROM swap_events
        WHERE wallet_address = ?
        ORDER BY timestamp DESC

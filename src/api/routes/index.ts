@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { getLeaderboardHandler } from '../controllers/leaderboard-controller';
+import { getLeaderboardHandler, getDisqualifiedHandler } from '../controllers/leaderboard-controller';
 import {
   getKolDetailsHandler,
   getKolTransactionsHandler,
@@ -21,6 +21,9 @@ router.get('/health', healthCheckHandler);
 
 // Leaderboard
 router.get('/leaderboard', validatePeriod, getLeaderboardHandler);
+
+// Wallets desqualificadas
+router.get('/leaderboard/disqualified', getDisqualifiedHandler);
 
 // KOL endpoints
 router.get('/kol/:address', validateAddress, getKolDetailsHandler);
