@@ -23,6 +23,12 @@
  *
  * Seguro para rodar múltiplas vezes (idempotente).
  * Não apaga nenhum swap_event — apenas atualiza campos.
+ *
+ * NOTA SOBRE PRECISÃO:
+ *   token_in_amount e token_out_amount são gravados no banco como inteiros RAW (wei),
+ *   em colunas DECIMAL(65,0). O MySQL retorna esses valores como strings para evitar
+ *   perda de precisão. Usamos BigInt para a conversão inicial e só depois convertemos
+ *   para float — isso evita erros de arredondamento em valores > 2^53.
  */
 
 import 'dotenv/config';
@@ -40,8 +46,39 @@ const BASE_TOKENS = new Map<string, string>([
   ['0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca', 'USDbC'],
 ]);
 
-// Número de wallets processadas em paralelo (não aumentar muito para não sobrecarregar o MySQL)
+// Número de wallets processadas em paralelo
 const WALLET_CONCURRENCY = 5;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Conversão segura de RAW (wei string) → float humano
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Converte um valor RAW (inteiro em string, ex: "5703410781985153175")
+ * para float em unidades humanas usando BigInt para preservar precisão.
+ *
+ * Equivale a: Number(rawStr) / 10^decimals
+ * mas sem perder bits significativos em valores > 2^53.
+ */
+function rawToFloat(rawStr: string, decimals: number): number {
+  if (!rawStr || rawStr === '0') return 0;
+
+  try {
+    const raw = BigInt(rawStr);
+    const divisor = BigInt(10) ** BigInt(decimals);
+
+    // Parte inteira
+    const intPart = raw / divisor;
+    // Parte fracionária (resto)
+    const fracPart = raw % divisor;
+
+    // Combinar: inteiro + fração / 10^decimals
+    return Number(intPart) + Number(fracPart) / Number(divisor);
+  } catch {
+    // Fallback para parseFloat caso o valor não seja um inteiro válido
+    return parseFloat(rawStr) / Math.pow(10, decimals);
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Tipos internos
@@ -53,10 +90,12 @@ interface SwapRow {
   timestamp: Date;
   token_in_address: string;
   token_in_symbol: string;
-  token_in_amount: string;   // raw (não dividido por decimais — já está dividido no banco)
+  token_in_amount: string;   // RAW inteiro como string (DECIMAL(65,0))
   token_out_address: string;
   token_out_symbol: string;
-  token_out_amount: string;  // raw
+  token_out_amount: string;  // RAW inteiro como string (DECIMAL(65,0))
+  token_in_decimals: number | null;
+  token_out_decimals: number | null;
 }
 
 interface Position {
@@ -72,26 +111,15 @@ interface Position {
 // Lógica principal por wallet
 // ─────────────────────────────────────────────────────────────────────────────
 
-/**
- * Reprocessa todos os swaps de uma wallet em ordem cronológica,
- * reconstruindo as posições e calculando o PnL real na moeda base.
- *
- * Retorna as posições ainda abertas ao final (para gravar na tabela positions).
- */
 async function reprocessWallet(
   walletAddress: string
 ): Promise<Map<string, Position>> {
-  // Buscar todos os swaps desta wallet em ordem cronológica
-  // NOTA: token_in_amount e token_out_amount já estão em unidades humanas no banco
-  //       (o block-indexer divide por 10^decimals antes de gravar em value_usd,
-  //        mas grava os amounts RAW em token_in_amount/token_out_amount).
-  //       Por isso precisamos dos decimais para converter.
-  const swaps = await query<SwapRow & { token_in_decimals: number | null; token_out_decimals: number | null }>(
+  const swaps = await query<SwapRow>(
     `SELECT
        se.id, se.tx_hash, se.timestamp,
        se.token_in_address,  se.token_in_symbol,  se.token_in_amount,
        se.token_out_address, se.token_out_symbol, se.token_out_amount,
-       ti.decimals AS token_in_decimals,
+       ti.decimals  AS token_in_decimals,
        to_.decimals AS token_out_decimals
      FROM swap_events se
      LEFT JOIN tokens ti  ON ti.address  = se.token_in_address
@@ -104,7 +132,7 @@ async function reprocessWallet(
   // Posições abertas em memória: token_address → Position
   const positions = new Map<string, Position>();
 
-  // Batch de UPDATEs para executar no final (evita N queries individuais)
+  // Batch de UPDATEs para executar no final
   const updates: Array<{
     id: number;
     swapType: 'buy' | 'sell' | 'swap';
@@ -118,11 +146,11 @@ async function reprocessWallet(
     const inAddr  = swap.token_in_address.toLowerCase();
     const outAddr = swap.token_out_address.toLowerCase();
 
-    // Converter amounts de raw (wei) para unidades humanas
+    // Converter RAW → float usando BigInt para preservar precisão
     const inDecimals  = swap.token_in_decimals  ?? 18;
     const outDecimals = swap.token_out_decimals ?? 18;
-    const amtIn  = parseFloat(swap.token_in_amount)  / Math.pow(10, inDecimals);
-    const amtOut = parseFloat(swap.token_out_amount) / Math.pow(10, outDecimals);
+    const amtIn  = rawToFloat(String(swap.token_in_amount),  inDecimals);
+    const amtOut = rawToFloat(String(swap.token_out_amount), outDecimals);
 
     const inIsBase  = BASE_TOKENS.has(inAddr);
     const outIsBase = BASE_TOKENS.has(outAddr);
@@ -153,13 +181,11 @@ async function reprocessWallet(
           openedAt:         new Date(swap.timestamp),
         });
       } else {
-        // Compra adicional: atualiza custo médio ponderado
         const newQty  = pos.qtyOpen       + amtOut;
         const newCost = pos.costBasisBase + amtIn;
         pos.qtyOpen       = newQty;
         pos.costBasisBase = newCost;
         pos.avgCostBase   = newQty > 0 ? newCost / newQty : 0;
-        // Mantém a moeda base original da posição
       }
 
     } else if (swapType === 'sell') {
@@ -170,14 +196,12 @@ async function reprocessWallet(
       const pos = positions.get(inAddr);
 
       if (pos && pos.qtyOpen > 0) {
-        // PnL = valor recebido em base − custo proporcional
         const costProporcional = pos.avgCostBase * amtIn;
         pnlBase       = amtOut - costProporcional;
         pnlBaseToken  = baseAddr;
         pnlBaseSymbol = baseSymbol;
         isWin         = pnlBase > 0 ? 1 : 0;
 
-        // Reduzir posição proporcionalmente
         const qtyAfter  = Math.max(0, pos.qtyOpen - amtIn);
         const costAfter = pos.qtyOpen > 0
           ? pos.costBasisBase * (qtyAfter / pos.qtyOpen)
@@ -192,7 +216,6 @@ async function reprocessWallet(
         }
       } else {
         // Venda sem compra registrada (posição anterior ao início da indexação)
-        // Registra swap_type mas não calcula PnL
         pnlBase       = null;
         pnlBaseToken  = baseAddr;
         pnlBaseSymbol = baseSymbol;
@@ -200,10 +223,9 @@ async function reprocessWallet(
       }
 
     } else {
-      // ── SWAP meme→meme: fecha posição do token vendido sem PnL em base ───
+      // ── SWAP meme→meme ────────────────────────────────────────────────────
       const pos = positions.get(inAddr);
       if (pos && pos.qtyOpen > 0) {
-        // Fecha posição do token vendido
         const qtyAfter  = Math.max(0, pos.qtyOpen - amtIn);
         const costAfter = pos.qtyOpen > 0
           ? pos.costBasisBase * (qtyAfter / pos.qtyOpen)
@@ -218,8 +240,6 @@ async function reprocessWallet(
         }
       }
 
-      // Abre posição do token recebido usando o custo da posição anterior como proxy
-      // (sem moeda base real — usamos o token vendido como referência)
       const existingOut = positions.get(outAddr);
       if (!existingOut) {
         positions.set(outAddr, {
@@ -239,14 +259,7 @@ async function reprocessWallet(
       }
     }
 
-    updates.push({
-      id: swap.id,
-      swapType,
-      pnlBase,
-      pnlBaseToken,
-      pnlBaseSymbol,
-      isWin,
-    });
+    updates.push({ id: swap.id, swapType, pnlBase, pnlBaseToken, pnlBaseSymbol, isWin });
   }
 
   // Gravar todos os UPDATEs no banco
@@ -273,14 +286,12 @@ async function reprocessWallet(
 async function recalculatePnl(): Promise<void> {
   logger.info('=== recalculate-pnl: iniciando recálculo completo de PnL ===');
 
-  // Contar total de swaps para progresso
   const totalSwapsResult = await query<{ cnt: number }>(
     'SELECT COUNT(*) AS cnt FROM swap_events'
   );
   const totalSwaps = Number(totalSwapsResult[0]?.cnt) || 0;
   logger.info(`Total de swap_events no banco: ${totalSwaps}`);
 
-  // Buscar todas as wallets com swaps
   const wallets = await query<{ wallet_address: string; cnt: number }>(
     `SELECT wallet_address, COUNT(*) AS cnt
      FROM swap_events
@@ -289,16 +300,15 @@ async function recalculatePnl(): Promise<void> {
   );
   logger.info(`Total de wallets a processar: ${wallets.length}`);
 
-  // ── Passo 1: Limpar tabela positions (será reconstruída) ──────────────────
+  // Passo 1: Limpar tabela positions
   logger.info('Limpando tabela positions...');
   await execute('DELETE FROM positions', []);
   logger.info('Tabela positions limpa.');
 
-  // ── Passo 2: Reprocessar cada wallet ─────────────────────────────────────
+  // Passo 2: Reprocessar cada wallet
   let walletsProcessed = 0;
   let swapsProcessed   = 0;
 
-  // Processar em lotes de WALLET_CONCURRENCY wallets em paralelo
   for (let i = 0; i < wallets.length; i += WALLET_CONCURRENCY) {
     const batch = wallets.slice(i, i + WALLET_CONCURRENCY);
 
@@ -309,7 +319,7 @@ async function recalculatePnl(): Promise<void> {
       })
     );
 
-    // Gravar posições abertas restantes na tabela positions
+    // Gravar posições abertas restantes
     for (const { wallet_address, cnt, openPositions } of results) {
       for (const [tokenAddress, pos] of openPositions.entries()) {
         if (pos.qtyOpen <= 0) continue;
@@ -319,9 +329,9 @@ async function recalculatePnl(): Promise<void> {
               qty_open, cost_basis_base, avg_cost_base, opened_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
            ON DUPLICATE KEY UPDATE
-             qty_open        = VALUES(qty_open),
-             cost_basis_base = VALUES(cost_basis_base),
-             avg_cost_base   = VALUES(avg_cost_base),
+             qty_open           = VALUES(qty_open),
+             cost_basis_base    = VALUES(cost_basis_base),
+             avg_cost_base      = VALUES(avg_cost_base),
              base_token_address = VALUES(base_token_address),
              base_token_symbol  = VALUES(base_token_symbol)`,
           [
@@ -348,10 +358,7 @@ async function recalculatePnl(): Promise<void> {
   }
 
   logger.info('Recálculo de PnL concluído. Atualizando kol_metrics...');
-
-  // ── Passo 3: Recalcular kol_metrics para todas as wallets ─────────────────
   await updateAllKolMetrics();
-
   logger.info('=== recalculate-pnl: concluído com sucesso ===');
 }
 
