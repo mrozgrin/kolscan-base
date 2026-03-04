@@ -207,51 +207,62 @@ async function updatePosition(
   costDelta: number,
   openedAt: Date
 ): Promise<{ avgCostBefore: number; costBasisBefore: number }> {
-  // Buscar posição atual
-  const rows = await query<{ qty_open: string; cost_basis_base: string; avg_cost_base: string }>(
-    `SELECT qty_open, cost_basis_base, avg_cost_base
-     FROM positions
-     WHERE wallet_address = ? AND token_address = ?`,
-    [walletAddress, tokenAddress]
-  );
-
-  const qtyBefore      = rows.length ? parseFloat(rows[0].qty_open)        : 0;
-  const costBefore     = rows.length ? parseFloat(rows[0].cost_basis_base) : 0;
-  const avgCostBefore  = rows.length ? parseFloat(rows[0].avg_cost_base)   : 0;
-
-  const qtyAfter  = Math.max(0, qtyBefore  + qtyDelta);
-  const costAfter = qtyDelta > 0
-    // Compra: acumula custo
-    ? costBefore + costDelta
-    // Venda: reduz custo proporcionalmente ao percentual vendido
-    : qtyBefore > 0 ? costBefore * (qtyAfter / qtyBefore) : 0;
-
-  const avgCostAfter = qtyAfter > 0 ? costAfter / qtyAfter : 0;
-
-  if (rows.length === 0) {
-    // Criar nova posição
-    await execute(
-      `INSERT INTO positions
-         (wallet_address, token_address, base_token_address, base_token_symbol,
-          qty_open, cost_basis_base, avg_cost_base, opened_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [walletAddress, tokenAddress, baseAddress, baseSymbol,
-       qtyAfter, costAfter, avgCostAfter, openedAt]
-    );
-  } else {
-    // Atualizar posição existente
-    await execute(
-      `UPDATE positions
-       SET qty_open = ?, cost_basis_base = ?, avg_cost_base = ?,
-           base_token_address = ?, base_token_symbol = ?, last_updated = NOW()
+  try {
+    // Buscar posição atual
+    const rows = await query<{ qty_open: string; cost_basis_base: string; avg_cost_base: string }>(
+      `SELECT qty_open, cost_basis_base, avg_cost_base
+       FROM positions
        WHERE wallet_address = ? AND token_address = ?`,
-      [qtyAfter, costAfter, avgCostAfter,
-       baseAddress, baseSymbol,
-       walletAddress, tokenAddress]
+      [walletAddress, tokenAddress]
     );
-  }
 
-  return { avgCostBefore, costBasisBefore: costBefore };
+    const qtyBefore      = rows.length ? parseFloat(rows[0].qty_open)        : 0;
+    const costBefore     = rows.length ? parseFloat(rows[0].cost_basis_base) : 0;
+    const avgCostBefore  = rows.length ? parseFloat(rows[0].avg_cost_base)   : 0;
+
+    const qtyAfter  = Math.max(0, qtyBefore  + qtyDelta);
+    const costAfter = qtyDelta > 0
+      // Compra: acumula custo
+      ? costBefore + costDelta
+      // Venda: reduz custo proporcionalmente ao percentual vendido
+      : qtyBefore > 0 ? costBefore * (qtyAfter / qtyBefore) : 0;
+
+    const avgCostAfter = qtyAfter > 0 ? costAfter / qtyAfter : 0;
+
+    if (rows.length === 0) {
+      // Criar nova posição
+      await execute(
+        `INSERT INTO positions
+           (wallet_address, token_address, base_token_address, base_token_symbol,
+            qty_open, cost_basis_base, avg_cost_base, opened_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [walletAddress, tokenAddress, baseAddress, baseSymbol,
+         qtyAfter, costAfter, avgCostAfter, openedAt]
+      );
+    } else {
+      // Atualizar posição existente
+      await execute(
+        `UPDATE positions
+         SET qty_open = ?, cost_basis_base = ?, avg_cost_base = ?,
+             base_token_address = ?, base_token_symbol = ?, last_updated = NOW()
+         WHERE wallet_address = ? AND token_address = ?`,
+        [qtyAfter, costAfter, avgCostAfter,
+         baseAddress, baseSymbol,
+         walletAddress, tokenAddress]
+      );
+    }
+
+    return { avgCostBefore, costBasisBefore: costBefore };
+  } catch (err) {
+    // Erro ao atualizar posição não deve travar o indexador.
+    // Registrar e retornar zeros — o swap ainda será gravado sem PnL.
+    logger.warn('updatePosition failed, skipping position update', {
+      walletAddress,
+      tokenAddress,
+      error: (err as Error).message,
+    });
+    return { avgCostBefore: 0, costBasisBefore: 0 };
+  }
 }
 
 /**
@@ -273,6 +284,7 @@ async function processSwapEvent(
   swapEvent: SwapEvent,
   walletAddress: string
 ): Promise<void> {
+  try {
   // ── Informações e decimais dos tokens ──────────────────────────────────────
   const [tokenInInfo, tokenOutInfo] = await Promise.all([
     getTokenInfo(swapEvent.token_in_address),
@@ -428,6 +440,15 @@ async function processSwapEvent(
       swapType,
     ]
   );
+  } catch (err) {
+    // Erro em processSwapEvent não deve travar o indexador.
+    // O bloco continua sendo processado normalmente.
+    logger.warn('processSwapEvent failed, swap skipped', {
+      tx_hash: swapEvent.tx_hash,
+      wallet: walletAddress,
+      error: (err as Error).message,
+    });
+  }
 }
 
 /**
