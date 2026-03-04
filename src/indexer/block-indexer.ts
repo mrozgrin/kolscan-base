@@ -1,6 +1,6 @@
 import { ethers } from 'ethers';
 import type { Block, TransactionResponse, Log } from 'ethers';
-import Decimal from 'decimal.js';
+import { Decimal } from 'decimal.js';
 import { getProvider, getBlockWithTransactions, getLatestBlockNumber } from './provider';
 import { extractSwapEvents, SWAP_TOPICS } from './dex-decoder';
 import { query, execute } from '../database/connection';
