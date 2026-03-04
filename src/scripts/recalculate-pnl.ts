@@ -97,6 +97,7 @@ async function reprocessWallet(
     id: number;
     swapType: 'buy' | 'sell' | 'swap';
     pnlBase: string | null;
+    pnlPct: string | null;
     pnlBaseToken: string | null;
     pnlBaseSymbol: string | null;
     isWin: number | null;
@@ -116,6 +117,7 @@ async function reprocessWallet(
 
     let swapType: 'buy' | 'sell' | 'swap' = 'swap';
     let pnlBase:       string | null = null;
+    let pnlPct:        string | null = null;
     let pnlBaseToken:  string | null = null;
     let pnlBaseSymbol: string | null = null;
     let isWin:         number | null = null;
@@ -126,8 +128,12 @@ async function reprocessWallet(
 
       const costProporcional = posIn.avgCostBase.mul(amtIn);
       const pnlDecimal       = amtOut.minus(costProporcional);
+      const pnlPctDecimal    = costProporcional.gt(ZERO)
+        ? pnlDecimal.div(costProporcional).mul(100)
+        : ZERO;
 
       pnlBase       = pnlDecimal.toFixed(18);
+      pnlPct        = pnlPctDecimal.toFixed(4);
       pnlBaseToken  = outAddr;
       pnlBaseSymbol = swap.token_out_symbol;
       isWin         = pnlDecimal.gt(ZERO) ? 1 : 0;
@@ -212,7 +218,7 @@ async function reprocessWallet(
       }
     }
 
-    updates.push({ id: swap.id, swapType, pnlBase, pnlBaseToken, pnlBaseSymbol, isWin });
+    updates.push({ id: swap.id, swapType, pnlBase, pnlPct, pnlBaseToken, pnlBaseSymbol, isWin });
   }
 
   // Gravar UPDATEs no banco
@@ -221,11 +227,12 @@ async function reprocessWallet(
       `UPDATE swap_events
        SET swap_type       = ?,
            pnl_base        = ?,
+           pnl_pct         = ?,
            pnl_base_token  = ?,
            pnl_base_symbol = ?,
            is_win          = ?
        WHERE id = ?`,
-      [u.swapType, u.pnlBase, u.pnlBaseToken, u.pnlBaseSymbol, u.isWin, u.id]
+      [u.swapType, u.pnlBase, u.pnlPct, u.pnlBaseToken, u.pnlBaseSymbol, u.isWin, u.id]
     );
   }
 

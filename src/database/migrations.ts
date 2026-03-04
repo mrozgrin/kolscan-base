@@ -706,6 +706,21 @@ const migrations: Array<{
         await ddl(`CREATE INDEX idx_se_swap_type ON swap_events(wallet_address, swap_type, timestamp)`);
     },
   },
+  {
+    version: 10,
+    name: 'add_pnl_pct_to_swap_events',
+    async up() {
+      const seCols = await query<{ COLUMN_NAME: string }>(
+        `SELECT COLUMN_NAME FROM information_schema.COLUMNS
+         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'swap_events'`
+      );
+      const seC = new Set(seCols.map((r) => r.COLUMN_NAME));
+
+      if (!seC.has('pnl_pct'))
+        await ddl(`ALTER TABLE swap_events ADD COLUMN pnl_pct DECIMAL(18,4) DEFAULT NULL
+          COMMENT 'Percentual de lucro/prejuízo da venda: (pnl_base / custo_proporcional) * 100'`);
+    },
+  },
 ];
 
 export async function runMigrations(): Promise<void> {
