@@ -277,8 +277,8 @@ async function processWalletAmostra(walletAddress: string): Promise<void> {
   }
   console.log('-'.repeat(60));
 
-  // Gravar no banco
-  console.log(`\n  Gravando ${updates.length} atualizações no banco...`);
+  // Gravar swap_events no banco
+  console.log(`\n  Gravando ${updates.length} atualizações em swap_events...`);
   for (const u of updates) {
     await execute(
       `UPDATE swap_events
@@ -291,6 +291,37 @@ async function processWalletAmostra(walletAddress: string): Promise<void> {
       [u.swapType, u.pnlBase, u.pnlBaseToken, u.pnlBaseSymbol, u.isWin, u.id]
     );
   }
+
+  // Gravar posições abertas na tabela positions
+  if (positions.size > 0) {
+    console.log(`  Gravando ${positions.size} posição(ões) abertas em positions...`);
+    for (const [tokenAddress, pos] of positions.entries()) {
+      if (pos.qtyOpen.lte(ZERO)) continue;
+      await execute(
+        `INSERT INTO positions
+           (wallet_address, token_address, base_token_address, base_token_symbol,
+            qty_open, cost_basis_base, avg_cost_base, opened_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
+         ON DUPLICATE KEY UPDATE
+           qty_open           = VALUES(qty_open),
+           cost_basis_base    = VALUES(cost_basis_base),
+           avg_cost_base      = VALUES(avg_cost_base),
+           base_token_address = VALUES(base_token_address),
+           base_token_symbol  = VALUES(base_token_symbol),
+           last_updated       = NOW()`,
+        [
+          walletAddress,
+          tokenAddress,
+          pos.baseTokenAddress,
+          pos.baseTokenSymbol,
+          pos.qtyOpen.toFixed(18),
+          pos.costBasisBase.toFixed(18),
+          pos.avgCostBase.toFixed(18),
+        ]
+      );
+    }
+  }
+
   console.log(`  ✓ Banco atualizado.`);
 }
 
