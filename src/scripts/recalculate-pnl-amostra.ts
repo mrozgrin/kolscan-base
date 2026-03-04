@@ -14,7 +14,7 @@
  */
 
 import 'dotenv/config';
-import { Decimal } from 'decimal.js';
+import Decimal from 'decimal.js';
 import { query, execute, closePool } from '../database/connection';
 import { logger } from '../utils/logger';
 
