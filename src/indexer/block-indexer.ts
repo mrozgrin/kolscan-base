@@ -1,5 +1,6 @@
 import { ethers } from 'ethers';
 import type { Block, TransactionResponse, Log } from 'ethers';
+import Decimal from 'decimal.js';
 import { getProvider, getBlockWithTransactions, getLatestBlockNumber } from './provider';
 import { extractSwapEvents, SWAP_TOPICS } from './dex-decoder';
 import { query, execute } from '../database/connection';
@@ -9,6 +10,19 @@ import { config } from '../config';
 import { logger } from '../utils/logger';
 import { sleep, chunkArray } from '../utils/helpers';
 import { SwapEvent } from '../types';
+
+// Precisão global para todos os cálculos de posição e PnL
+Decimal.set({ precision: 36, rounding: Decimal.ROUND_DOWN });
+
+// Tokens considerados "moeda base" na blockchain Base
+const BASE_TOKENS = new Map<string, string>([
+  ['0x4200000000000000000000000000000000000006', 'WETH'],
+  ['0x833589fcd6edb6e08f4c7c32d4f71b54bda02913', 'USDC'],
+  ['0xfde4c96c8593536e31f229ea8f37b2ada2699bb2', 'USDT'],
+  ['0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca', 'USDbC'],
+]);
+
+const ZERO = new Decimal(0);
 
 interface IndexerStatus {
   isRunning: boolean;
