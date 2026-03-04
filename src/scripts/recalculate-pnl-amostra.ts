@@ -4,11 +4,29 @@
  * Uso:
  *   npm run recalculate-pnl-amostra
  *
- * Diferenças em relação ao recalculate-pnl completo:
- *   - Processa apenas as wallets listadas em SAMPLE_WALLETS
- *   - Exibe no terminal um relatório detalhado de cada swap (tipo, amounts, PnL)
- *   - NÃO recalcula kol_metrics ao final (mais rápido para validação)
- *   - Atualiza o banco normalmente — use para validar antes do recálculo completo
+ * MODELO DE POSIÇÃO UNIVERSAL (sem BASE_TOKENS fixos):
+ *
+ *   Cada token que uma wallet possui tem uma posição com:
+ *     - token_address      : o token acumulado (ex: CHARLES)
+ *     - base_token_address : o token gasto para comprá-lo (ex: VIRTUAL)
+ *     - qty_open           : quantidade em carteira
+ *     - cost_basis_base    : total gasto em base para comprar
+ *     - avg_cost_base      : custo médio por unidade em base
+ *
+ *   Para cada swap A → B:
+ *
+ *   CASO 1 — VENDA (A tem posição aberta com custo em B):
+ *     PnL = recebido_B − (avg_cost_B × qty_A_vendida)
+ *     PnL expresso em B (a moeda base da posição de A)
+ *
+ *   CASO 2 — COMPRA (B não tem posição, ou tem posição com custo em A):
+ *     Abre/aumenta posição em B com custo em A (VWAP)
+ *
+ *   CASO 3 — TROCA SEM PNL (A tem posição com custo em outro token ≠ B):
+ *     Fecha posição de A (sem PnL calculável), abre posição em B com custo em A
+ *
+ *   CASO 4 — TROCA SEM PNL (B tem posição com custo em outro token ≠ A):
+ *     Fecha posição de B (sem PnL), abre nova posição em B com custo em A
  *
  * Todos os cálculos usam Decimal.js (precisão arbitrária).
  */
@@ -28,16 +46,6 @@ const SAMPLE_WALLETS = [
   '0xb6f1824162f01512213cc692ca87aed0fb3a4ce9',
   '0x6550815de033dc3d92a04dc4eaa2c303dda99ade',
 ];
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Tokens base
-// ─────────────────────────────────────────────────────────────────────────────
-const BASE_TOKENS = new Map<string, string>([
-  ['0x4200000000000000000000000000000000000006', 'WETH'],
-  ['0x833589fcd6edb6e08f4c7c32d4f71b54bda02913', 'USDC'],
-  ['0xfde4c96c8593536e31f229ea8f37b2ada2699bb2', 'USDT'],
-  ['0xd9aaec86b65d86f6a7b5b1b0c42ffa531710b6ca', 'USDbC'],
-]);
 
 const ZERO = new Decimal(0);
 
@@ -69,6 +77,8 @@ interface SwapRow {
 }
 
 interface Position {
+  tokenAddress: string;
+  tokenSymbol: string;
   baseTokenAddress: string;
   baseTokenSymbol: string;
   qtyOpen: Decimal;
@@ -77,7 +87,7 @@ interface Position {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Processamento de uma wallet com output detalhado
+// Processamento de uma wallet
 // ─────────────────────────────────────────────────────────────────────────────
 async function processWalletAmostra(walletAddress: string): Promise<void> {
   console.log('\n' + '='.repeat(100));
@@ -108,11 +118,8 @@ async function processWalletAmostra(walletAddress: string): Promise<void> {
 
   console.log(`  Total de swaps: ${swaps.length}\n`);
 
+  // Posições em memória: token_address → Position
   const positions = new Map<string, Position>();
-  let totalPnl = ZERO;
-  let totalVendas = 0;
-  let vendasComPnl = 0;
-  let vendasSemPosicao = 0;
 
   const updates: Array<{
     id: number;
@@ -123,6 +130,11 @@ async function processWalletAmostra(walletAddress: string): Promise<void> {
     isWin: number | null;
   }> = [];
 
+  let totalPnlByBase = new Map<string, Decimal>(); // base_symbol → pnl acumulado
+  let totalVendas = 0;
+  let vendasComPnl = 0;
+  let vendasSemPosicao = 0;
+
   for (const swap of swaps) {
     const inAddr  = swap.token_in_address.toLowerCase();
     const outAddr = swap.token_out_address.toLowerCase();
@@ -132,117 +144,116 @@ async function processWalletAmostra(walletAddress: string): Promise<void> {
     const amtIn  = rawToDecimal(String(swap.token_in_amount),  inDecimals);
     const amtOut = rawToDecimal(String(swap.token_out_amount), outDecimals);
 
-    const inIsBase  = BASE_TOKENS.has(inAddr);
-    const outIsBase = BASE_TOKENS.has(outAddr);
+    const ts = new Date(swap.timestamp).toISOString().replace('T', ' ').substring(0, 19);
 
-    let swapType: 'buy' | 'sell' | 'swap';
-    if      (inIsBase && !outIsBase)  swapType = 'buy';
-    else if (!inIsBase && outIsBase)  swapType = 'sell';
-    else                              swapType = 'swap';
+    // Posição atual de cada token envolvido
+    const posIn  = positions.get(inAddr);   // posição do token que está saindo
+    const posOut = positions.get(outAddr);  // posição do token que está entrando
 
+    let swapType: 'buy' | 'sell' | 'swap' = 'swap';
     let pnlBase:       string | null = null;
     let pnlBaseToken:  string | null = null;
     let pnlBaseSymbol: string | null = null;
     let isWin:         number | null = null;
-    let logPnl = '';
 
-    const ts = new Date(swap.timestamp).toISOString().replace('T', ' ').substring(0, 19);
+    // ── CASO 1: VENDA ─────────────────────────────────────────────────────────
+    // token_in tem posição aberta e a moeda base dessa posição é o token_out
+    if (posIn && posIn.baseTokenAddress === outAddr && posIn.qtyOpen.gt(ZERO)) {
+      swapType = 'sell';
+      totalVendas++;
+      vendasComPnl++;
 
-    if (swapType === 'buy') {
-      const baseAddr   = inAddr;
-      const baseSymbol = BASE_TOKENS.get(baseAddr) ?? swap.token_in_symbol;
+      const costProporcional = posIn.avgCostBase.mul(amtIn);
+      const pnlDecimal       = amtOut.minus(costProporcional);
 
-      const pos = positions.get(outAddr);
-      if (!pos) {
+      pnlBase       = pnlDecimal.toFixed(18);
+      pnlBaseToken  = outAddr;
+      pnlBaseSymbol = swap.token_out_symbol;
+      isWin         = pnlDecimal.gt(ZERO) ? 1 : 0;
+
+      // Acumular PnL por moeda base para o resumo
+      const prev = totalPnlByBase.get(swap.token_out_symbol) ?? ZERO;
+      totalPnlByBase.set(swap.token_out_symbol, prev.plus(pnlDecimal));
+
+      // Reduzir posição
+      const qtyAfter = Decimal.max(ZERO, posIn.qtyOpen.minus(amtIn));
+      const costAfter = posIn.qtyOpen.gt(ZERO)
+        ? posIn.costBasisBase.mul(qtyAfter).div(posIn.qtyOpen)
+        : ZERO;
+
+      if (qtyAfter.lte(ZERO)) {
+        positions.delete(inAddr);
+      } else {
+        posIn.qtyOpen       = qtyAfter;
+        posIn.costBasisBase = costAfter;
+        posIn.avgCostBase   = qtyAfter.gt(ZERO) ? costAfter.div(qtyAfter) : ZERO;
+      }
+
+      const winStr = pnlDecimal.gt(ZERO) ? '✓ WIN' : '✗ LOSS';
+      console.log(`  [${ts}] id=${swap.id} SELL ${amtIn.toFixed(4)} ${swap.token_in_symbol} → ${amtOut.toFixed(6)} ${swap.token_out_symbol}`);
+      console.log(`           → custo_prop=${costProporcional.toFixed(6)} ${swap.token_out_symbol} | recebido=${amtOut.toFixed(6)} ${swap.token_out_symbol}`);
+      console.log(`           → PnL = ${pnlDecimal.toFixed(8)} ${swap.token_out_symbol}  ${winStr}`);
+      console.log(`           → pnl_base ANTES: ${swap.pnl_base_atual ?? 'NULL'} | DEPOIS: ${pnlDecimal.toFixed(8)}`);
+
+    // ── CASO 2: COMPRA — B não tem posição ou tem posição com custo em A ──────
+    } else if (!posOut || (posOut.baseTokenAddress === inAddr)) {
+      swapType = 'buy';
+
+      if (!posOut) {
+        // Nova posição
         positions.set(outAddr, {
-          baseTokenAddress: baseAddr,
-          baseTokenSymbol:  baseSymbol,
+          tokenAddress:     outAddr,
+          tokenSymbol:      swap.token_out_symbol,
+          baseTokenAddress: inAddr,
+          baseTokenSymbol:  swap.token_in_symbol,
           qtyOpen:          amtOut,
           costBasisBase:    amtIn,
           avgCostBase:      amtOut.gt(ZERO) ? amtIn.div(amtOut) : ZERO,
         });
       } else {
-        const newQty  = pos.qtyOpen.plus(amtOut);
-        const newCost = pos.costBasisBase.plus(amtIn);
-        pos.qtyOpen       = newQty;
-        pos.costBasisBase = newCost;
-        pos.avgCostBase   = newQty.gt(ZERO) ? newCost.div(newQty) : ZERO;
+        // Aumenta posição existente (VWAP)
+        const newQty  = posOut.qtyOpen.plus(amtOut);
+        const newCost = posOut.costBasisBase.plus(amtIn);
+        posOut.qtyOpen       = newQty;
+        posOut.costBasisBase = newCost;
+        posOut.avgCostBase   = newQty.gt(ZERO) ? newCost.div(newQty) : ZERO;
       }
 
-      const pos2 = positions.get(outAddr)!;
-      logPnl = `avg_cost=${pos2.avgCostBase.toFixed(8)} ${baseSymbol} | posição=${pos2.qtyOpen.toFixed(4)} ${swap.token_out_symbol}`;
+      const p = positions.get(outAddr)!;
       console.log(`  [${ts}] id=${swap.id} BUY  ${amtIn.toFixed(6)} ${swap.token_in_symbol} → ${amtOut.toFixed(4)} ${swap.token_out_symbol}`);
-      console.log(`           → ${logPnl}`);
+      console.log(`           → avg_cost=${p.avgCostBase.toFixed(8)} ${swap.token_in_symbol} | posição=${p.qtyOpen.toFixed(4)} ${swap.token_out_symbol}`);
 
-    } else if (swapType === 'sell') {
-      totalVendas++;
-      const baseAddr   = outAddr;
-      const baseSymbol = BASE_TOKENS.get(baseAddr) ?? swap.token_out_symbol;
-
-      const pos = positions.get(inAddr);
-
-      if (pos && pos.qtyOpen.gt(ZERO)) {
-        vendasComPnl++;
-        const costProporcional = pos.avgCostBase.mul(amtIn);
-        const pnlDecimal       = amtOut.minus(costProporcional);
-
-        pnlBase       = pnlDecimal.toFixed(18);
-        pnlBaseToken  = baseAddr;
-        pnlBaseSymbol = baseSymbol;
-        isWin         = pnlDecimal.gt(ZERO) ? 1 : 0;
-        totalPnl      = totalPnl.plus(pnlDecimal);
-
-        const qtyAfter = Decimal.max(ZERO, pos.qtyOpen.minus(amtIn));
-        const costAfter = pos.qtyOpen.gt(ZERO)
-          ? pos.costBasisBase.mul(qtyAfter).div(pos.qtyOpen)
-          : ZERO;
-
-        if (qtyAfter.lte(ZERO)) {
-          positions.delete(inAddr);
-        } else {
-          pos.qtyOpen       = qtyAfter;
-          pos.costBasisBase = costAfter;
-          pos.avgCostBase   = qtyAfter.gt(ZERO) ? costAfter.div(qtyAfter) : ZERO;
-        }
-
-        const winStr = pnlDecimal.gt(ZERO) ? '✓ WIN' : '✗ LOSS';
-        console.log(`  [${ts}] id=${swap.id} SELL ${amtIn.toFixed(4)} ${swap.token_in_symbol} → ${amtOut.toFixed(6)} ${swap.token_out_symbol}`);
-        console.log(`           → custo_prop=${costProporcional.toFixed(6)} ${baseSymbol} | recebido=${amtOut.toFixed(6)} ${baseSymbol}`);
-        console.log(`           → PnL = ${pnlDecimal.toFixed(8)} ${baseSymbol}  ${winStr}`);
-        console.log(`           → pnl_base ANTES: ${swap.pnl_base_atual ?? 'NULL'} | DEPOIS: ${pnlDecimal.toFixed(8)}`);
-
-      } else {
-        vendasSemPosicao++;
-        pnlBase       = null;
-        pnlBaseToken  = baseAddr;
-        pnlBaseSymbol = baseSymbol;
-        isWin         = null;
-
-        console.log(`  [${ts}] id=${swap.id} SELL ${amtIn.toFixed(4)} ${swap.token_in_symbol} → ${amtOut.toFixed(6)} ${swap.token_out_symbol}`);
-        console.log(`           → ⚠ sem posição registrada (compra anterior à indexação) — PnL = NULL`);
-      }
-
+    // ── CASO 3/4: SWAP sem PnL calculável ─────────────────────────────────────
     } else {
-      console.log(`  [${ts}] id=${swap.id} SWAP ${amtIn.toFixed(4)} ${swap.token_in_symbol} → ${amtOut.toFixed(4)} ${swap.token_out_symbol}`);
+      swapType = 'swap';
 
-      const pos = positions.get(inAddr);
-      if (pos && pos.qtyOpen.gt(ZERO)) {
-        const qtyAfter = Decimal.max(ZERO, pos.qtyOpen.minus(amtIn));
-        const costAfter = pos.qtyOpen.gt(ZERO)
-          ? pos.costBasisBase.mul(qtyAfter).div(pos.qtyOpen)
+      // Verifica se há posição de token_in sem moeda base correspondente
+      if (posIn && posIn.qtyOpen.gt(ZERO)) {
+        totalVendas++;
+        vendasSemPosicao++;
+        // Fecha posição de A sem PnL (moeda base não coincide com B)
+        const qtyAfter = Decimal.max(ZERO, posIn.qtyOpen.minus(amtIn));
+        const costAfter = posIn.qtyOpen.gt(ZERO)
+          ? posIn.costBasisBase.mul(qtyAfter).div(posIn.qtyOpen)
           : ZERO;
         if (qtyAfter.lte(ZERO)) {
           positions.delete(inAddr);
         } else {
-          pos.qtyOpen       = qtyAfter;
-          pos.costBasisBase = costAfter;
-          pos.avgCostBase   = qtyAfter.gt(ZERO) ? costAfter.div(qtyAfter) : ZERO;
+          posIn.qtyOpen       = qtyAfter;
+          posIn.costBasisBase = costAfter;
+          posIn.avgCostBase   = qtyAfter.gt(ZERO) ? costAfter.div(qtyAfter) : ZERO;
         }
       }
 
+      // Fecha posição de B se existir com outra base, e abre nova com custo em A
+      if (posOut && posOut.baseTokenAddress !== inAddr) {
+        positions.delete(outAddr);
+      }
       const existingOut = positions.get(outAddr);
       if (!existingOut) {
         positions.set(outAddr, {
+          tokenAddress:     outAddr,
+          tokenSymbol:      swap.token_out_symbol,
           baseTokenAddress: inAddr,
           baseTokenSymbol:  swap.token_in_symbol,
           qtyOpen:          amtOut,
@@ -256,6 +267,9 @@ async function processWalletAmostra(walletAddress: string): Promise<void> {
         existingOut.costBasisBase = newCost;
         existingOut.avgCostBase   = newQty.gt(ZERO) ? newCost.div(newQty) : ZERO;
       }
+
+      console.log(`  [${ts}] id=${swap.id} SWAP ${amtIn.toFixed(4)} ${swap.token_in_symbol} → ${amtOut.toFixed(4)} ${swap.token_out_symbol}`);
+      console.log(`           → sem moeda base coincidente — PnL = NULL`);
     }
 
     updates.push({ id: swap.id, swapType, pnlBase, pnlBaseToken, pnlBaseSymbol, isWin });
@@ -267,12 +281,20 @@ async function processWalletAmostra(walletAddress: string): Promise<void> {
   console.log(`  Total swaps         : ${swaps.length}`);
   console.log(`  Vendas totais       : ${totalVendas}`);
   console.log(`  Vendas com PnL calc : ${vendasComPnl}`);
-  console.log(`  Vendas sem posição  : ${vendasSemPosicao}`);
-  console.log(`  PnL total realizado : ${totalPnl.toFixed(8)} (moedas base)`);
+  console.log(`  Vendas sem PnL      : ${vendasSemPosicao}`);
+  if (totalPnlByBase.size > 0) {
+    console.log(`  PnL realizado:`);
+    for (const [symbol, pnl] of totalPnlByBase.entries()) {
+      const winStr = pnl.gt(ZERO) ? '✓' : '✗';
+      console.log(`    ${winStr} ${pnl.toFixed(8)} ${symbol}`);
+    }
+  } else {
+    console.log(`  PnL realizado       : nenhum`);
+  }
   if (positions.size > 0) {
     console.log(`  Posições abertas    : ${positions.size} token(s)`);
-    for (const [addr, pos] of positions.entries()) {
-      console.log(`    ${addr.substring(0, 10)}... qty=${pos.qtyOpen.toFixed(4)} | avg_cost=${pos.avgCostBase.toFixed(8)} ${pos.baseTokenSymbol}`);
+    for (const [, pos] of positions.entries()) {
+      console.log(`    ${pos.tokenSymbol}: qty=${pos.qtyOpen.toFixed(4)} | avg_cost=${pos.avgCostBase.toFixed(8)} ${pos.baseTokenSymbol}`);
     }
   }
   console.log('-'.repeat(60));
