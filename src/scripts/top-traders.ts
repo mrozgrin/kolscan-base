@@ -4,7 +4,7 @@
  * Exibe os top traders no terminal com todas as variáveis calculadas.
  *
  * Uso:
- *   npm run top-traders                  → top 20, período 30 dias
+ *   npm run top-traders                  → top 100, período 30 dias
  *   npm run top-traders -- --limit 50    → top 50
  *   npm run top-traders -- --period 7    → últimos 7 dias
  *   npm run top-traders -- --limit 10 --period 90
@@ -20,7 +20,7 @@ function getArg(name: string, defaultVal: number): number {
   if (idx !== -1 && args[idx + 1]) return parseInt(args[idx + 1], 10) || defaultVal;
   return defaultVal;
 }
-const LIMIT      = getArg('limit', 100);
+const LIMIT       = getArg('limit', 100);
 const PERIOD_DAYS = getArg('period', 30);
 
 // ─── Cores ANSI ───────────────────────────────────────────────────────────────
@@ -97,7 +97,14 @@ function fmtHold(seconds: number | null | undefined): string {
   return `${Math.floor(s / 86400)}d ${Math.floor((s % 86400) / 3600)}h`;
 }
 
-function separator(char = '─', width = 110): string {
+// Padding que ignora os escape codes ANSI ao calcular largura
+function padEnd(str: string, len: number): string {
+  const clean = str.replace(/\x1b\[[0-9;]*m/g, '');
+  const pad = Math.max(0, len - clean.length);
+  return str + ' '.repeat(pad);
+}
+
+function separator(char = '─', width = 130): string {
   return C.dim + char.repeat(width) + C.reset;
 }
 
@@ -115,12 +122,10 @@ interface TraderRow {
   holding_time_avg_s:          number;
   scalping_rate:               number;
   long_trade_rate_pct:         number;
-  // Followability
   followability_final:         number;
   followability_hold_score:    number;
   followability_volume_score:  number;
   followability_liq_score:     number;
-  // Consistência
   consistency_final:           number;
   consistency_wr_stability:    number;
   consistency_pnl_stability:   number;
@@ -128,7 +133,6 @@ interface TraderRow {
   monthly_wr_cv:               number;
   profitable_months_ratio:     number;
   diversification_ratio:       number;
-  // PnL
   pnl_final:                   number;
   pnl_relative_score:          number;
   pnl_profit_factor:           number;
@@ -136,9 +140,7 @@ interface TraderRow {
   gross_profit_usd:            number;
   gross_loss_usd:              number;
   p90_benchmark_usd:           number;
-  // Win Rate
   win_rate_score:              number;
-  // Outros
   unique_tokens_traded:        number;
   best_trade_pnl:              number;
   worst_trade_pnl:             number;
@@ -150,9 +152,10 @@ interface TraderRow {
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 async function main() {
-  console.log('\n' + separator('═'));
+  const W = 130;
+  console.log('\n' + separator('═', W));
   console.log(
-    `${C.bgBlue}${C.white}${C.bold}  🏆  TOP TRADERS — KOLSCAN                                                                                    ${C.reset}`
+    `${C.bgBlue}${C.white}${C.bold}  🏆  TOP TRADERS — KOLSCAN${' '.repeat(W - 28)}${C.reset}`
   );
   console.log(
     `${C.dim}  Período: últimos ${PERIOD_DAYS} dias  |  Exibindo top ${LIMIT} traders  |  ${new Date().toLocaleString('pt-BR')}${C.reset}`
@@ -160,7 +163,7 @@ async function main() {
   console.log(
     `${C.dim}  Uso: npm run top-traders -- --limit 50 --period 7${C.reset}`
   );
-  console.log(separator('═'));
+  console.log(separator('═', W));
 
   // Mapear dias para o label usado na tabela kol_metrics
   const period = PERIOD_DAYS <= 1 ? 'daily' : PERIOD_DAYS <= 7 ? 'weekly' : PERIOD_DAYS <= 30 ? 'monthly' : 'all_time';
@@ -218,124 +221,156 @@ async function main() {
   if (rows.length === 0) {
     console.log(`\n${C.yellow}  Nenhum trader encontrado para o período "${period}" (--period ${PERIOD_DAYS}).${C.reset}`);
     console.log(`  Possíveis causas:`);
-    console.log(`    1. O metrics-updater ainda não rodou para este período.`);
+    console.log(`    1. O analyzer ainda não rodou para este período.`);
     console.log(`    2. Tente outro período: --period 1, --period 7, --period 30, --period 90`);
-    console.log(`    3. Verifique se há dados em kol_metrics: SELECT DISTINCT period FROM kol_metrics LIMIT 10;\n`);
+    console.log(`    3. Verifique: SELECT DISTINCT period FROM kol_metrics LIMIT 10;\n`);
     process.exit(0);
   }
 
-  // PnL % diário = profit_pct / period_days
   const periodMap: Record<string, number> = { 'daily': 1, 'weekly': 7, 'monthly': 30, 'all_time': 365 };
   const days = periodMap[period] || PERIOD_DAYS;
 
   rows.forEach((t, idx) => {
-    const rank       = idx + 1;
-    const wallet     = t.wallet_address;
-    const shortWallet = `${wallet.substring(0, 6)}...${wallet.substring(wallet.length - 4)}`;
-    const name       = t.label ? `${C.bold}${t.label}${C.reset}` : shortWallet;
+    const rank  = idx + 1;
+    const wallet = t.wallet_address;
+    const name  = t.label ? `${C.bold}${t.label}${C.reset}` : wallet;
     const pnlDailyPct = t.profit_pct != null ? t.profit_pct / days : null;
 
-    // ── Cabeçalho do trader ──────────────────────────────────────────────────
     const rankStr = rank <= 3
       ? ['🥇', '🥈', '🥉'][rank - 1]
-      : `${C.dim}#${rank.toString().padStart(2)}${C.reset}`;
+      : `${C.dim}#${rank.toString().padStart(3)}${C.reset}`;
 
-    console.log('\n' + separator());
+    // ── Cabeçalho do trader ──────────────────────────────────────────────────
+    console.log('\n' + separator('─', W));
+    console.log(`  ${rankStr}  ${C.bold}${C.white}${name}${C.reset}`);
+    if (t.label) {
+      console.log(`       ${C.dim}${wallet}${C.reset}`);
+    }
     console.log(
-      `  ${rankStr}  ${C.bold}${C.white}${name}${C.reset}  ${C.dim}${wallet}${C.reset}`
-    );
-    console.log(
-      `      ${scoreLabel(t.follow_score)}  ` +
-      `${scoreBar(t.follow_score)}  ` +
+      `       ${scoreLabel(t.follow_score)}  ` +
+      `${scoreBar(t.follow_score, 25)}  ` +
       `${scoreColor(t.follow_score)}${C.bold}${fmt(t.follow_score)}/100${C.reset}`
     );
 
-    // ── Linha 1: PnL e Win Rate ──────────────────────────────────────────────
+    // ── Linha 1: PnL ────────────────────────────────────────────────────────
     console.log(
-      `\n  ${C.bold}PnL Total:${C.reset} ${fmtUsd(t.profit_usd)}  ` +
-      `${C.bold}PnL %:${C.reset} ${fmtPnl(t.profit_pct)}  ` +
-      `${C.bold}PnL Diário:${C.reset} ${fmtPnl(pnlDailyPct)}  ` +
-      `${C.bold}Win Rate:${C.reset} ${fmtPnl(t.win_rate, '%')}`
+      `\n  ${C.bold}PnL Total:${C.reset} ${padEnd(fmtUsd(t.profit_usd), 14)}` +
+      `  ${C.bold}PnL Médio/trade:${C.reset} ${padEnd(fmtPnl(t.profit_pct), 12)}` +
+      `  ${C.bold}PnL Diário:${C.reset} ${padEnd(fmtPnl(pnlDailyPct), 12)}` +
+      `  ${C.bold}Win Rate:${C.reset} ${fmtPnl(t.win_rate, '%')}`
     );
 
     // ── Linha 2: Trades ──────────────────────────────────────────────────────
     console.log(
-      `  ${C.bold}Trades:${C.reset} ${t.total_trades}  ` +
-      `${C.green}✓ ${t.wins}${C.reset}  ${C.red}✗ ${t.losses}${C.reset}  ` +
-      `${C.bold}Trades/dia:${C.reset} ${fmt(t.trades_per_day)}  ` +
-      `${C.bold}Tokens únicos:${C.reset} ${t.unique_tokens_traded ?? 'N/A'}  ` +
-      `${C.bold}Diversif.:${C.reset} ${fmt(t.diversification_ratio ? t.diversification_ratio * 100 : null, 1, '%')}`
+      `  ${C.bold}Trades:${C.reset} ${String(t.total_trades).padEnd(4)}` +
+      `  ${C.green}✓ Wins: ${t.wins}${C.reset}  ${C.red}✗ Losses: ${t.losses}${C.reset}` +
+      `  ${C.bold}Trades/dia:${C.reset} ${padEnd(fmt(t.trades_per_day), 8)}` +
+      `  ${C.bold}Tokens únicos:${C.reset} ${String(t.unique_tokens_traded ?? 'N/A').padEnd(4)}` +
+      `  ${C.bold}Diversif.:${C.reset} ${fmt(t.diversification_ratio ? t.diversification_ratio * 100 : null, 1, '%')}`
     );
 
     // ── Linha 3: Tempo e Scalping ────────────────────────────────────────────
     console.log(
-      `  ${C.bold}Hold médio:${C.reset} ${fmtHold(t.holding_time_avg_s)}  ` +
-      `${C.bold}Scalping:${C.reset} ${fmt(t.scalping_rate, 1, '%')}  ` +
-      `${C.bold}Long trades:${C.reset} ${fmt(t.long_trade_rate_pct, 1, '%')}  ` +
-      `${C.bold}Melhor trade:${C.reset} ${fmtUsd(t.best_trade_pnl)}  ` +
-      `${C.bold}Pior trade:${C.reset} ${fmtUsd(t.worst_trade_pnl)}`
+      `  ${C.bold}Hold médio:${C.reset} ${padEnd(fmtHold(t.holding_time_avg_s), 12)}` +
+      `  ${C.bold}Scalping:${C.reset} ${padEnd(fmt(t.scalping_rate, 1, '%'), 8)}` +
+      `  ${C.bold}Long trades:${C.reset} ${padEnd(fmt(t.long_trade_rate_pct, 1, '%'), 8)}` +
+      `  ${C.bold}Melhor trade:${C.reset} ${padEnd(fmtPnl(t.best_trade_pnl), 12)}` +
+      `  ${C.bold}Pior trade:${C.reset} ${fmtPnl(t.worst_trade_pnl)}`
     );
 
     // ── Componentes do Follow Score ──────────────────────────────────────────
-    console.log(`\n  ${C.bold}${C.cyan}── Componentes do Follow Score ──${C.reset}`);
+    console.log(`\n  ${C.bold}${C.cyan}── Componentes do Follow Score ──────────────────────────────────────────────${C.reset}`);
 
     // Followability
     console.log(
-      `  ${C.magenta}Followability${C.reset} ${scoreBar(t.followability_final, 15)} ${fmt(t.followability_final)}/100  ` +
-      `${C.dim}Hold: ${fmt(t.followability_hold_score)} | Volume: ${fmt(t.followability_volume_score)} | Liq: ${fmt(t.followability_liq_score)}${C.reset}`
+      `  ${C.magenta}Followability ${C.reset}${scoreBar(t.followability_final, 18)} ` +
+      `${padEnd(fmt(t.followability_final) + '/100', 10)}  ` +
+      `${C.dim}Hold: ${fmt(t.followability_hold_score, 1).padEnd(6)} | Volume: ${fmt(t.followability_volume_score, 1).padEnd(6)} | Liq: ${fmt(t.followability_liq_score, 1)}${C.reset}`
     );
 
     // Consistência
     console.log(
-      `  ${C.blue}Consistência  ${C.reset} ${scoreBar(t.consistency_final, 15)} ${fmt(t.consistency_final)}/100  ` +
-      `${C.dim}WR Stab: ${fmt(t.consistency_wr_stability)} | PnL Stab: ${fmt(t.consistency_pnl_stability)} | Divers: ${fmt(t.consistency_diversification)}${C.reset}`
+      `  ${C.blue}Consistência  ${C.reset}${scoreBar(t.consistency_final, 18)} ` +
+      `${padEnd(fmt(t.consistency_final) + '/100', 10)}  ` +
+      `${C.dim}WR Stab: ${fmt(t.consistency_wr_stability, 1).padEnd(6)} | PnL Stab: ${fmt(t.consistency_pnl_stability, 1).padEnd(6)} | Divers: ${fmt(t.consistency_diversification, 1)}${C.reset}`
     );
     console.log(
-      `  ${C.dim}              WR CV: ${fmt(t.monthly_wr_cv, 1, '%')} | Meses lucrativos: ${fmt(t.profitable_months_ratio, 1, '%')}${C.reset}`
+      `  ${C.dim}                                                    ` +
+      `WR CV: ${fmt(t.monthly_wr_cv, 1, '%').padEnd(10)} | Meses lucrativos: ${fmt(t.profitable_months_ratio, 1, '%')}${C.reset}`
     );
 
     // PnL Score
     console.log(
-      `  ${C.green}PnL Score     ${C.reset} ${scoreBar(t.pnl_final, 15)} ${fmt(t.pnl_final)}/100  ` +
-      `${C.dim}Rel: ${fmt(t.pnl_relative_score)} | PF Score: ${fmt(t.pnl_pf_score)}${C.reset}`
+      `  ${C.green}PnL Score     ${C.reset}${scoreBar(t.pnl_final, 18)} ` +
+      `${padEnd(fmt(t.pnl_final) + '/100', 10)}  ` +
+      `${C.dim}Rel: ${fmt(t.pnl_relative_score, 1).padEnd(6)} | PF Score: ${fmt(t.pnl_pf_score, 1)}${C.reset}`
     );
     console.log(
-      `  ${C.dim}              Profit Factor: ${fmt(t.pnl_profit_factor, 2)} | Gross Profit: ${fmtUsd(t.gross_profit_usd)} | Gross Loss: ${fmtUsd(t.gross_loss_usd)} | P90: ${fmtUsd(t.p90_benchmark_usd)}${C.reset}`
+      `  ${C.dim}                                                    ` +
+      `Profit Factor: ${fmt(t.pnl_profit_factor, 2).padEnd(8)} | Gross Profit: ${fmtUsd(t.gross_profit_usd)} | Gross Loss: ${fmtUsd(t.gross_loss_usd)} | P90: ${fmtUsd(t.p90_benchmark_usd)}${C.reset}`
     );
 
     // Win Rate Score
     console.log(
-      `  ${C.yellow}Win Rate      ${C.reset} ${scoreBar(t.win_rate_score, 15)} ${fmt(t.win_rate_score)}/100  ` +
+      `  ${C.yellow}Win Rate      ${C.reset}${scoreBar(t.win_rate_score, 18)} ` +
+      `${padEnd(fmt(t.win_rate_score) + '/100', 10)}  ` +
       `${C.dim}Win Rate: ${fmt(t.win_rate, 1, '%')}${C.reset}`
     );
   });
 
   // ── Tabela resumo ──────────────────────────────────────────────────────────
-  console.log('\n' + separator('═'));
+  console.log('\n' + separator('═', W));
   console.log(`${C.bold}${C.white}  RESUMO RÁPIDO — TOP ${rows.length} TRADERS${C.reset}`);
-  console.log(separator());
+  console.log(separator('─', W));
+
+  // Cabeçalho da tabela
+  const H = {
+    rank:   4,
+    wallet: 44,
+    score:  8,
+    pnlUsd: 12,
+    pnlPct: 10,
+    pnlDay: 10,
+    wr:     8,
+    trades: 7,
+    hold:   11,
+    scalp:  7,
+  };
   console.log(
-    `  ${'#'.padEnd(3)}  ${'Wallet'.padEnd(14)}  ${'Score'.padEnd(7)}  ${'PnL Total'.padEnd(12)}  ${'PnL %'.padEnd(8)}  ${'PnL/dia'.padEnd(8)}  ${'WR%'.padEnd(7)}  ${'Trades'.padEnd(7)}  ${'Hold'.padEnd(9)}  Scalp%`
+    `  ${'#'.padEnd(H.rank)}  ` +
+    `${'Wallet'.padEnd(H.wallet)}  ` +
+    `${'Score'.padEnd(H.score)}  ` +
+    `${'PnL USD'.padEnd(H.pnlUsd)}  ` +
+    `${'PnL%/trade'.padEnd(H.pnlPct)}  ` +
+    `${'PnL%/dia'.padEnd(H.pnlDay)}  ` +
+    `${'WR%'.padEnd(H.wr)}  ` +
+    `${'Trades'.padEnd(H.trades)}  ` +
+    `${'Hold'.padEnd(H.hold)}  ` +
+    `Scalp%`
   );
-  console.log(separator());
+  console.log(separator('─', W));
 
   rows.forEach((t, idx) => {
-    const shortW = `${t.wallet_address.substring(0, 6)}...${t.wallet_address.substring(t.wallet_address.length - 4)}`;
-    const name   = t.label ? t.label.substring(0, 12).padEnd(14) : shortW.padEnd(14);
     const pnlDailyPct = t.profit_pct != null ? t.profit_pct / days : null;
-
-    const scoreStr = `${scoreColor(t.follow_score)}${fmt(t.follow_score).padEnd(7)}${C.reset}`;
-    const pnlStr   = fmtUsd(t.profit_usd).padEnd(12);
-    const pnlPctStr = fmtPnl(t.profit_pct).padEnd(8);
-    const dailyStr  = fmtPnl(pnlDailyPct).padEnd(8);
-    const wrStr     = fmtPnl(t.win_rate, '%').padEnd(7);
+    const name = t.label
+      ? t.label.substring(0, H.wallet - 2).padEnd(H.wallet)
+      : t.wallet_address.padEnd(H.wallet);
 
     console.log(
-      `  ${String(idx + 1).padEnd(3)}  ${name}  ${scoreStr}  ${pnlStr}  ${pnlPctStr}  ${dailyStr}  ${wrStr}  ${String(t.total_trades).padEnd(7)}  ${fmtHold(t.holding_time_avg_s).padEnd(9)}  ${fmt(t.scalping_rate, 1, '%')}`
+      `  ${padEnd(String(idx + 1), H.rank)}  ` +
+      `${padEnd(name, H.wallet)}  ` +
+      `${padEnd(scoreColor(t.follow_score) + fmt(t.follow_score) + C.reset, H.score)}  ` +
+      `${padEnd(fmtUsd(t.profit_usd), H.pnlUsd)}  ` +
+      `${padEnd(fmtPnl(t.profit_pct), H.pnlPct)}  ` +
+      `${padEnd(fmtPnl(pnlDailyPct), H.pnlDay)}  ` +
+      `${padEnd(fmtPnl(t.win_rate, '%'), H.wr)}  ` +
+      `${String(t.total_trades).padEnd(H.trades)}  ` +
+      `${padEnd(fmtHold(t.holding_time_avg_s), H.hold)}  ` +
+      `${fmt(t.scalping_rate, 1, '%')}`
     );
   });
 
-  console.log(separator('═') + '\n');
+  console.log(separator('═', W) + '\n');
   process.exit(0);
 }
 

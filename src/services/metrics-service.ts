@@ -231,7 +231,12 @@ export async function updateKolMetrics(wallet: string): Promise<void> {
                 COALESCE(AVG(holding_time_s),0) AS holding_time_avg_s,
                 COALESCE(SUM(CASE WHEN is_long_trade=0 THEN 1 ELSE 0 END)/NULLIF(COUNT(*),0)*100,0) AS scalping_rate,
                 COALESCE(AVG(is_long_trade),0) AS long_trade_rate,
-                COALESCE(MAX(pnl),0) AS best_trade_pnl, COALESCE(MIN(pnl),0) AS worst_trade_pnl,
+                -- best/worst: usa pnl_pct (percentual real) quando disponível, senão pnl legado
+                COALESCE(MAX(CASE WHEN pnl_pct IS NOT NULL THEN pnl_pct ELSE pnl END), 0) AS best_trade_pnl,
+                COALESCE(MIN(CASE WHEN pnl_pct IS NOT NULL THEN pnl_pct ELSE pnl END), 0) AS worst_trade_pnl,
+                -- profit_pct: média ponderada dos pnl_pct das vendas (trades fechados)
+                COALESCE(AVG(CASE WHEN pnl_pct IS NOT NULL THEN pnl_pct ELSE NULL END), 0) AS avg_pnl_pct,
+                -- total_invested: soma do custo das compras em USD (fallback para cálculo legado)
                 COALESCE(SUM(CASE WHEN swap_type='buy' AND value_usd>0 THEN value_usd
                                WHEN swap_type IS NULL AND value_usd>0 THEN value_usd
                                ELSE 0 END),1) AS total_invested_usd
@@ -241,7 +246,12 @@ export async function updateKolMetrics(wallet: string): Promise<void> {
       const b = basicRows[0];
       if (!b) continue;
       // Cap em 999999.9999 para evitar out-of-range na coluna DECIMAL(20,4)
-      const rawProfitPct = Number(b.total_invested_usd)>0 ? Math.round((Number(b.profit_usd)/Number(b.total_invested_usd))*10000)/100 : 0;
+      // profit_pct: usa a média dos pnl_pct individuais (percentual real por trade fechado)
+      // Se não houver pnl_pct (dados legados), cai para profit_usd/total_invested_usd
+      const avgPnlPct = Number((b as any).avg_pnl_pct);
+      const rawProfitPct = avgPnlPct !== 0
+        ? avgPnlPct
+        : (Number(b.total_invested_usd) > 0 ? Math.round((Number(b.profit_usd) / Number(b.total_invested_usd)) * 10000) / 100 : 0);
       const profitPct = Math.min(999999.9999, Math.max(-999999.9999, rawProfitPct));
       const periodStart = new Date(Date.now()-period.days*86400*1000);
 
