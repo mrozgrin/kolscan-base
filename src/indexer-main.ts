@@ -77,7 +77,7 @@ async function main(): Promise<void> {
 
   logger.info('═══════════════════════════════════════════════════════');
   logger.info('  KOLSCAN INDEXER is running');
-  logger.info(`  API: http://localhost:${config.api.port}`);
+  logger.info(`  API: http://localhost:${config.port}`);
   logger.info('  Analyzer: run "npm run analyzer" in a separate terminal');
   logger.info('═══════════════════════════════════════════════════════');
 
