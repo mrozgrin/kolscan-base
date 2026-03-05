@@ -64,15 +64,14 @@ function scheduleDailyUtc(
 export async function startMetricsUpdater(): Promise<void> {
   logger.info('Starting metrics updater job...');
 
-  // Recálculo inicial síncrono — garante que o leaderboard esteja pronto
-  // antes da API começar a aceitar requisições.
-  logger.info('Running initial metrics recalculation from existing MySQL data...');
-  try {
-    await updateAllKolMetrics();
-    logger.info('Initial metrics recalculation completed — leaderboard is ready');
-  } catch (err) {
-    logger.error('Initial metrics recalculation failed', { error: (err as Error).message });
-  }
+  // Recálculo inicial assíncrono — não bloqueia a inicialização do servidor.
+  // O leaderboard fica disponível assim que o recálculo terminar em background.
+  logger.info('Running initial metrics recalculation in background (non-blocking)...');
+  setImmediate(() => {
+    updateAllKolMetrics()
+      .then(() => logger.info('Initial metrics recalculation completed — leaderboard is ready'))
+      .catch((err) => logger.error('Initial metrics recalculation failed', { error: (err as Error).message }));
+  });
 
   // Atualização periódica intraday (a cada 5 min por padrão)
   metricsInterval = setInterval(async () => {

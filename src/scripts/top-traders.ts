@@ -209,8 +209,8 @@ async function main() {
        AND km.has_sufficient_data = 1
        AND w.is_disqualified = 0
      ORDER BY km.follow_score DESC
-     LIMIT ?`,
-    [period, LIMIT]
+     LIMIT ${LIMIT}`,
+    [period]
   );
 
   if (rows.length === 0) {
