@@ -12,6 +12,7 @@
     "recalculate-holding": "ts-node src/scripts/recalculate-holding.ts",
     "recalculate-pnl": "ts-node src/scripts/recalculate-pnl.ts",
     "recalculate-pnl-amostra": "ts-node src/scripts/recalculate-pnl-amostra.ts",
+    "top-traders": "ts-node src/scripts/top-traders.ts",
     "test": "echo \"No tests configured yet\" && exit 0"
   },
   "repository": {
