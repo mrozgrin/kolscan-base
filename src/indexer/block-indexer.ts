@@ -420,9 +420,19 @@ async function processSwapEvent(
     ? null
     : holdingTimeS >= scalpingThreshold ? 1 : 0;
 
+  // ── Log visual do swap ─────────────────────────────────────────────────────
+  const pnlStr = pnlBase !== null
+    ? ` | PnL: ${pnlBase >= 0 ? '+' : ''}${pnlBase.toFixed(6)} ${pnlBaseSymbol} (${isWin ? '✓' : '✗'})`
+    : '';
+  logger.info(
+    `  [${swapType.toUpperCase().padEnd(4)}] ${walletAddress.substring(0, 8)}... ` +
+    `${tokenInAmount.toFixed(4)} ${tokenInSymbol} → ${tokenOutAmount.toFixed(4)} ${tokenOutSymbol}` +
+    `${pnlStr} → MySQL ✓`
+  );
+
   // ── Salvar evento de swap ──────────────────────────────────────────────────
   await execute(
-    `INSERT IGNORE INTO swap_events (
+    `INSERT IGNORE INTO swap_events (`
        tx_hash, block_number, timestamp, wallet_address, dex_address, dex_name,
        token_in_address, token_in_symbol, token_in_amount,
        token_out_address, token_out_symbol, token_out_amount,
@@ -568,14 +578,24 @@ async function processBlock(blockNumber: number): Promise<void> {
 
   const transactions = block.prefetchedTransactions as TransactionResponse[];
 
+  const blockDate = new Date(Number(block.timestamp) * 1000).toISOString().replace('T', ' ').substring(0, 19);
   logger.debug(`Processing block ${blockNumber} with ${transactions.length} transactions`);
 
   // Processar transações em batches para não sobrecarregar o RPC
   const batches = chunkArray(transactions, 10);
+  let swapCount = 0;
 
   for (const batch of batches) {
-    await Promise.allSettled(
+    const results = await Promise.allSettled(
       batch.map((tx) => processTransaction(tx, block, provider))
+    );
+    // Contar swaps processados com sucesso no batch
+    swapCount += results.filter((r) => r.status === 'fulfilled').length;
+  }
+
+  if (swapCount > 0) {
+    logger.info(
+      `[BLOCK ${blockNumber}] ${blockDate} | ${swapCount} tx(s) processada(s) → MySQL ✓`
     );
   }
 }
@@ -620,10 +640,24 @@ async function syncHistoricalBlocks(
     const progress = (processedBlocks / totalBlocks) * 100;
     const elapsed = (Date.now() - startTime) / 1000;
     const blocksPerSecond = processedBlocks / elapsed;
+    const eta = blocksPerSecond > 0
+      ? Math.round((totalBlocks - processedBlocks) / blocksPerSecond)
+      : null;
+    const etaStr = eta !== null
+      ? eta > 3600
+        ? `${Math.floor(eta / 3600)}h${Math.floor((eta % 3600) / 60)}m`
+        : eta > 60
+          ? `${Math.floor(eta / 60)}m${eta % 60}s`
+          : `${eta}s`
+      : '?';
 
     await updateIndexerState(endBlock, true, progress);
 
-    logger.info(`Sync progress: ${progress.toFixed(2)}% (${processedBlocks}/${totalBlocks} blocks, ${blocksPerSecond.toFixed(2)} blocks/s)`);
+    logger.info(
+      `[SYNC] ${progress.toFixed(1)}% | bloco ${endBlock} | ` +
+      `${blocksPerSecond.toFixed(1)} blocos/s | ETA: ${etaStr} | ` +
+      `${processedBlocks}/${totalBlocks} blocos`
+    );
 
     await sleep(100);
   }
@@ -639,6 +673,11 @@ const RETRY_PENDING_EVERY_N_CYCLES = 10; // a cada ~10 × pollingInterval
 async function startRealtimeIndexing(): Promise<void> {
   logger.info('Starting real-time indexing...');
 
+  let realtimeSwapTotal = 0;
+  let realtimeBlockTotal = 0;
+  let lastHeartbeat = Date.now();
+  const HEARTBEAT_INTERVAL_MS = 30_000; // log de "vivo" a cada 30s mesmo sem novos blocos
+
   while (isRunning) {
     try {
       const latestBlock = await getLatestBlockNumber();
@@ -649,11 +688,29 @@ async function startRealtimeIndexing(): Promise<void> {
           config.blockchain.batchSize
         );
 
+        logger.info(
+          `[REALTIME] ${blocksToProcess} novo(s) bloco(s) detectado(s) ` +
+          `(${lastIndexedBlock + 1} → ${lastIndexedBlock + blocksToProcess}) | ` +
+          `head da rede: ${latestBlock}`
+        );
+
         for (let i = 1; i <= blocksToProcess; i++) {
           const blockNum = lastIndexedBlock + i;
           await processBlock(blockNum);
           lastIndexedBlock = blockNum;
           await updateIndexerState(blockNum, false);
+          realtimeBlockTotal++;
+        }
+
+        lastHeartbeat = Date.now();
+      } else {
+        // Nenhum bloco novo — emitir heartbeat periódico para confirmar que está vivo
+        if (Date.now() - lastHeartbeat >= HEARTBEAT_INTERVAL_MS) {
+          logger.info(
+            `[REALTIME] aguardando novos blocos... | último bloco: ${lastIndexedBlock} | ` +
+            `blocos processados nesta sessão: ${realtimeBlockTotal}`
+          );
+          lastHeartbeat = Date.now();
         }
       }
 
