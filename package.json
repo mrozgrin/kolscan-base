@@ -27,6 +27,7 @@
     "recalculate-pnl-amostra": "ts-node src/scripts/recalculate-pnl-amostra.ts",
     "recalculate-all": "ts-node src/scripts/recalculate-all.ts",
     "top-traders": "ts-node src/scripts/top-traders.ts",
+    "wallet-detail": "ts-node src/scripts/wallet-detail.ts --",
     "test": "echo \"No tests configured yet\" && exit 0"
   },
   "repository": {
