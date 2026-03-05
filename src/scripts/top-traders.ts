@@ -162,8 +162,8 @@ async function main() {
   );
   console.log(separator('═'));
 
-  // Período mais recente disponível para cada wallet
-  const period = PERIOD_DAYS <= 7 ? '7d' : PERIOD_DAYS <= 30 ? '30d' : '90d';
+  // Mapear dias para o label usado na tabela kol_metrics
+  const period = PERIOD_DAYS <= 1 ? 'daily' : PERIOD_DAYS <= 7 ? 'weekly' : PERIOD_DAYS <= 30 ? 'monthly' : 'all_time';
 
   const rows = await query<TraderRow>(
     `SELECT
@@ -209,7 +209,6 @@ async function main() {
      JOIN wallets w ON w.address = km.wallet_address
      WHERE km.period = ?
        AND km.follow_score IS NOT NULL
-       AND km.has_sufficient_data = 1
        AND w.is_disqualified = 0
      ORDER BY km.follow_score DESC
      LIMIT ${LIMIT}`,
@@ -217,13 +216,16 @@ async function main() {
   );
 
   if (rows.length === 0) {
-    console.log(`\n${C.yellow}  Nenhum trader encontrado para o período "${period}".${C.reset}`);
-    console.log(`  Verifique se o metrics-updater já rodou ou tente outro período (--period 7, 30, 90).\n`);
+    console.log(`\n${C.yellow}  Nenhum trader encontrado para o período "${period}" (--period ${PERIOD_DAYS}).${C.reset}`);
+    console.log(`  Possíveis causas:`);
+    console.log(`    1. O metrics-updater ainda não rodou para este período.`);
+    console.log(`    2. Tente outro período: --period 1, --period 7, --period 30, --period 90`);
+    console.log(`    3. Verifique se há dados em kol_metrics: SELECT DISTINCT period FROM kol_metrics LIMIT 10;\n`);
     process.exit(0);
   }
 
   // PnL % diário = profit_pct / period_days
-  const periodMap: Record<string, number> = { '7d': 7, '30d': 30, '90d': 90 };
+  const periodMap: Record<string, number> = { 'daily': 1, 'weekly': 7, 'monthly': 30, 'all_time': 365 };
   const days = periodMap[period] || PERIOD_DAYS;
 
   rows.forEach((t, idx) => {
