@@ -4,9 +4,22 @@
   "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
+
+    "_comment_indexer": "=== PROGRAMA 1: INDEXER (blockchain → MySQL) ===",
+    "indexer": "node dist/indexer-main.js",
+    "indexer:dev": "nodemon --exec ts-node src/indexer-main.ts",
+    "indexer:api-only": "INDEXER_ENABLED=false nodemon --exec ts-node src/indexer-main.ts",
+
+    "_comment_analyzer": "=== PROGRAMA 2: ANALYZER (métricas e follow score) ===",
+    "analyzer": "node dist/analyzer-main.js",
+    "analyzer:dev": "nodemon --exec ts-node src/analyzer-main.ts",
+
+    "_comment_legacy": "=== LEGADO (mantido para compatibilidade) ===",
     "start": "node dist/index.js",
     "dev": "nodemon --exec ts-node src/index.ts",
     "dev:api-only": "INDEXER_ENABLED=false nodemon --exec ts-node src/index.ts",
+
+    "_comment_tools": "=== FERRAMENTAS ===",
     "typecheck": "tsc --noEmit",
     "db:migrate": "ts-node -e \"require('./src/database/migrations').runMigrations().then(() => process.exit(0)).catch((e: unknown) => { console.error(e); process.exit(1); })\"",
     "recalculate-holding": "ts-node src/scripts/recalculate-holding.ts",
