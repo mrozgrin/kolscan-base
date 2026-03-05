@@ -432,7 +432,7 @@ async function processSwapEvent(
 
   // ── Salvar evento de swap ──────────────────────────────────────────────────
   await execute(
-    `INSERT IGNORE INTO swap_events (`
+    `INSERT IGNORE INTO swap_events (
        tx_hash, block_number, timestamp, wallet_address, dex_address, dex_name,
        token_in_address, token_in_symbol, token_in_amount,
        token_out_address, token_out_symbol, token_out_amount,
