@@ -20,7 +20,7 @@ function getArg(name: string, defaultVal: number): number {
   if (idx !== -1 && args[idx + 1]) return parseInt(args[idx + 1], 10) || defaultVal;
   return defaultVal;
 }
-const LIMIT      = getArg('limit', 20);
+const LIMIT      = getArg('limit', 100);
 const PERIOD_DAYS = getArg('period', 30);
 
 // ─── Cores ANSI ───────────────────────────────────────────────────────────────
@@ -156,6 +156,9 @@ async function main() {
   );
   console.log(
     `${C.dim}  Período: últimos ${PERIOD_DAYS} dias  |  Exibindo top ${LIMIT} traders  |  ${new Date().toLocaleString('pt-BR')}${C.reset}`
+  );
+  console.log(
+    `${C.dim}  Uso: npm run top-traders -- --limit 50 --period 7${C.reset}`
   );
   console.log(separator('═'));
 
